@@ -1,7 +1,7 @@
 import torch
 from data_handler.dataset_factory import GenericDataset
 from PIL import Image
-from datasets import load_dataset
+from datasets import load_from_disk
 
 # https://github.com/huggingface/transformers/blob/main/src/transformers/models/blip/image_processing_blip.py
 class StableBiasIdentity(GenericDataset):
@@ -24,10 +24,20 @@ class StableBiasIdentity(GenericDataset):
                 'no_ethnicity_specified']
     gender_set = ['man', 'woman', 'non-binary', 'no_gender_specified']
 
-    def __init__(self, transform=None, processor=None):
+    def __init__(self, transform=None, processor=None, **kwargs):
         # self.dataset = dataset
-        path = '/n/holylabs/LABS/calmon_labs/Lab/datasets/stable_bias'
-        self.dataset = load_dataset('tti-bias/identities', split='train')
+        GenericDataset.__init__(self, **kwargs)
+        # path = '/n/holylabs/LABS/calmon_lab/Lab/datasets/stable_bias'
+        path = '/n/holyscratch01/calmon_lab/Lab/datasets/stable_bias/identities'
+        # self.dataset = load_dataset('tti-bias/identities', split='train', cache_dir=path)
+        self.dataset = load_from_disk(path)
+
+        # Original dataset contains generated samples from three diffreent models
+        # self.dataset = self.dataset.filter(lambda x: x['model'] == self.args.target_model) 
+        model_list = self.dataset['model']
+        idx = [i for i, x in enumerate(model_list) if x == self.args.target_model]
+        self.dataset = self.dataset.select(idx)
+        
         self.processor = processor
         self.transform = transform
 
@@ -46,17 +56,32 @@ class StableBiasIdentity(GenericDataset):
             image = image['pixel_values'][0]
         race = self.race_set.index(data["ethnicity"])
         gender = self.gender_set.index(data["gender"])
-
         return image, race, gender
     
-
 class StableBiasProfession(GenericDataset):
 
-    def __init__(self, transform=None, processor=None):
-        # self.dataset = dataset
-        path = '/n/holylabs/LABS/calmon_labs/Lab/datasets/stable_bias'
-        self.dataset = load_dataset('tti-bias/professions', split='train')
-        self.profession_set = self.dataset['profession']
+    def __init__(self, transform=None, processor=None, **kwargs):
+        GenericDataset.__init__(self, **kwargs)
+        # path = '/n/holylabs/LABS/calmon_lab/Lab/datasets/stable_bias'
+        path = '/n/holyscratch01/calmon_lab/Lab/datasets/stable_bias/professions'
+        self.dataset = load_from_disk(path)
+        # self.dataset = self.dataset.select(range(1000))
+        # self.dataset = self.dataset.filter(lambda x: x['model'] == self.args.target_model) 
+        model_list = self.dataset['model']
+        idx = [i for i, x in enumerate(model_list) if x == self.args.target_model]
+        self.dataset = self.dataset.select(idx)
+
+        self.profession_set = list(set(self.dataset['profession']))
+
+        # Original dataset contains generated samples from three diffreent models
+        if self.args.target_profession != 'all':
+            if self.args.target_profession not in self.profession_set:
+                raise ValueError(f"Profession {self.args.target_profession} not in dataset")
+            # self.dataset = self.dataset.filter(lambda x: x['profession'] == self.args.target_profession)
+            profession_list = self.dataset['profession']
+            idx = [i for i, x in enumerate(profession_list) if x == self.args.target_profession]
+            self.dataset = self.dataset.select(idx)
+
         self.processor = processor
         self.transform = transform
 
@@ -75,3 +100,4 @@ class StableBiasProfession(GenericDataset):
             image = image['pixel_values'][0]
         profession = self.profession_set.index(data["profession"])
         return image, profession
+

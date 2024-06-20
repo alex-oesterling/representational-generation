@@ -6,6 +6,7 @@ from torchvision import transforms
 from torch.utils.data import DataLoader
 import torchvision.transforms.functional as TF
 
+
 import random 
 
 from transformers import BlipProcessor, BlipModel, BlipForConditionalGeneration, BlipForQuestionAnswering
@@ -27,8 +28,8 @@ class DataloaderFactory:
             processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
         
         elif args.vision_encoder == 'CLIP':
-            from transformers import CLIPProcessor
-            processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+            import clip
+            _, transform = clip.load("ViT-B/32", device= 'cpu')
 
         else:
             # For CelebA
@@ -48,11 +49,11 @@ class DataloaderFactory:
                     transforms.Normalize(mean=mean, std=std)] 
                 )
 
-        test_dataset = DatasetFactory.get_dataset(dataname, test_transform, processor)
+        test_dataset = DatasetFactory.get_dataset(args, dataname, transform, processor, split='test')
 
         if args.train:       # If training, use the training dataset
-            train_dataset = DatasetFactory.get_dataset(dataname, transform, processor)            
-            val_dataset = DatasetFactory.get_dataset(dataname, transform, processor)
+            train_dataset = DatasetFactory.get_dataset(args, dataname, transform, processor, split='train')            
+            # val_dataset = DatasetFactory.get_dataset(argrs, dataname, transform, processor, split='val')
 
         def _init_fn(worker_id):
             np.random.seed(int(args.seed))
@@ -61,8 +62,9 @@ class DataloaderFactory:
 
         if args.train:
             train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.n_workers, worker_init_fn=_init_fn, pin_memory=True, drop_last=True)
-            val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, num_workers=args.n_workers, worker_init_fn=_init_fn, pin_memory=True, drop_last=True)
+            # val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, num_workers=args.n_workers, worker_init_fn=_init_fn, pin_memory=True, drop_last=True)
         
-            return train_dataloader, val_dataloader, test_dataloader
+            # return train_dataloader, val_dataloader, test_dataloader
+            return train_dataloader, test_dataloader
         
         return test_dataloader

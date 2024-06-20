@@ -10,16 +10,29 @@ def get_args():
     # For coupmting MPR
     parser.add_argument('--refer-dataset', type=str, default='stable_bias_i')
     parser.add_argument('--query-dataset', type=str, default='stable_bias_p')
-    parser.add_argument('--vision-encoder', type=str, default='BLIP')
+    parser.add_argument('--vision-encoder', type=str, default='BLIP', 
+                        choices = ['BLIP', 'CLIP', 'PATHS'])
+    parser.add_argument('--target-profession', type=str, default='all')
+    parser.add_argument('--target-model', type=str, default='SD_14', #required=True, 
+                        choices = ['SD_14','SD_2', 'DallE'])
+    
+    # For retrieving the dataset
+    parser.add_argument('--retrieve', default=False, action='store_true', help='retrieve the dataset')
+    parser.add_argument('--retriever', type=str, default='mapr', choices=['mapr', 'random'])
+    parser.add_argument('--k', type=int, default=20, help='the number of retrieved sample')
 
-    parser.add_argument('--target-model', type=str, default='sd1.4', #required=True, 
-                        choices = ['sd1.4', 'sd1.5', 'sd2.0', 'dalle2'])
+    # Hyperparameters used for each dataset
+    parser.add_argument('--binarize-age', default=True, action='store_false', help='it is used for fairface only')                    
 
     # Hyperparameters for training
     parser.add_argument('--train', default=False, action='store_true', help='train the model')
     parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
     parser.add_argument('--epochs', type=int, default=10, help='number of epochs')
     parser.add_argument('--batch-size', type=int, default=64)
+
+    # Info for result file names 
+    parser.add_argument('--date', type=str, default='061824', help='date when to save')
+    parser.add_argument('--save-dir', type=str, default='results/', help='directory to save the results')
 
     args = parser.parse_args()
     return args
