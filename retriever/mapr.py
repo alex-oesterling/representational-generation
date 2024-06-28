@@ -1,4 +1,5 @@
 from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
 from tqdm import tqdm
 from retriever.solver import GurobiIP, GurobiLP
 import numpy as np
@@ -6,23 +7,23 @@ from retriever import GenericRetriever
 from utils import getMPR
 
 class Retriever(GenericRetriever):
-    def __init__(self):
-        GenericRetriever.__init__(self)
+    def __init__(self, **kwargs):
+        GenericRetriever.__init__(self, **kwargs)
 
-    def retrieve(retrieval_labels, curated_labels, k=10):
+    def retrieve(self, retrieval_labels, curated_labels, k=10, s=None):
         cutting_planes = 50
         m = retrieval_labels.shape[0]
 
         # compute similarities
-        s = np.ones(m)
+        if s is None:
+            s = np.ones(m)
 
         top_indices = np.zeros(m)
         top_indices[np.argsort(s.squeeze())[::-1][:k]] = 1
         sim_upper_bound = s.T@top_indices
         print("Similarity Upper Bound", sim_upper_bound, flush=True)
         
-        oracle = LinearRegression()
-        solver2 = GurobiLP(s, retrieval_labels, curation_set=curated_labels, model = oracle)
+        solver2 = GurobiLP(s, retrieval_labels, curation_set=curated_labels, model = self.args.functionclass)
         # solver = GurobiIP(s, retrieval_labels, curation_set=curated_labels, model = oracle)
 
         reps_relaxed = []
@@ -32,8 +33,14 @@ class Retriever(GenericRetriever):
         rounded_sims_final = []
         relaxed_indices_list = []
         rounded_indices_list = []
-        rhos = np.linspace(0.005, 2.505, 50)
-        indices = top_indices
+
+        indices = top_indices        
+        
+        basic_mpr, _ = getMPR(retrieval_labels, k, curated_labels, self.args.functionclass, indices)
+        print("basic mpr", basic_mpr)
+
+        rhos = np.linspace(0, basic_mpr, 30)
+
         for rho in rhos[::-1]:
             print('rho : ', rho)
             indices = solver2.fit(k, cutting_planes, rho, indices)
@@ -44,12 +51,13 @@ class Retriever(GenericRetriever):
             indices_rounded[np.argsort(indices_rounded)[::-1][k:]] = 0
             indices_rounded[indices_rounded>1e-5] = 1.0 
 
-            rep = solver2.get_representation(indices, k)
+            # rep = solver2.get_representation(indices, k)
+            rep = getMPR(retrieval_labels, k, curated_labels, self.args.functionclass, indices)
             sim = solver2.get_similarity(indices)
 
-            rounded_rep = solver2.get_representation(indices_rounded, k)
+            # rounded_rep = solver2.get_representation(indices_rounded, k)
             rounded_sim = solver2.get_similarity(indices_rounded)
-            rounded_rep,_ = getMPR(retrieval_labels, k, curated_labels, oracle, indices_rounded)
+            rounded_rep,_ = getMPR(retrieval_labels, k, curated_labels, self.args.functionclass, indices_rounded)
 
             reps_relaxed.append(rep)
             sims_relaxed.append(sim)
@@ -71,7 +79,8 @@ class Retriever(GenericRetriever):
             # sims_gurobi.append(sim)
             # rhoslist.append(rho)
 
+        print("final relaxed mprs", reps_relaxed)
         print("final mprs", rounded_reps_final)
-        print("final sims", sims_relaxed)
+        print("final sims", rounded_sims_final)
 
-        return relaxed_indices_list[-1], sims_relaxed
+        return rounded_indices_list[-1], reps_relaxed, rounded_sims_final

@@ -2,15 +2,20 @@ import torch
 import numpy as np 
 import os
 from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
 from transformers import BlipProcessor
 import random 
 
 import pickle
 from tqdm import tqdm
+import clip
 
 def make_result_path(args):
-    filename = f'{args.query_dataset}_{args.refer_dataset}_{args.vision_encoder}_{args.target_model}_{args.target_profession}'
-    filename += f'_{args.retriever}_{args.k}' if args.retrieve else ''
+    filename = f'{args.query_dataset}_{args.refer_dataset}_{args.vision_encoder}_{args.target_model}_{args.functionclass}'
+    if args.retriever != 'random_ratio':
+        filename += f'_{args.retriever}_{args.k}' if args.retrieve else ''
+    else:
+        filename += f'_{args.retriever}_{args.ratio}' if args.retrieve else ''
     save_dir = os.path.join(args.save_dir, args.date)
     check_log_dir(save_dir)
     
@@ -24,16 +29,26 @@ def check_log_dir(log_dir):
         print("Failed to create directory!!")
 
 def set_seed(seed): 
+    torch.cuda.manual_seed_all(seed)
     torch.manual_seed(seed)
-    # torch.cuda.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
-def oracle_function(indices, dataset, curation_set=None, model=None):
-    if model is None:
+def oracle_function(indices, dataset, curation_set=None, modelname='linear'):
+    if modelname == 'linear':
         model = LinearRegression()
+    elif 'dt' in modelname:
+        if len(modelname) > 2:
+            max_depth = int(modelname[2:])
+        else: 
+            max_depth = 2
+        model = RandomForestRegressor(max_depth=max_depth, random_state=0)
+    elif modelname == 'l2':
+        return alpha
+    else:
+        raise ValueError('Only linear and dt are supported for now')
 
     k = int(np.sum(indices))
     if curation_set is not None:
@@ -43,25 +58,27 @@ def oracle_function(indices, dataset, curation_set=None, model=None):
         a_expanded = np.concatenate((indices, np.zeros(curation_set.shape[0])))
         m = curation_set.shape[0]
         alpha = (a_expanded/k - curation_indicator/m)
-        reg = model.fit(expanded_dataset, alpha)
+        reg = model.fit(expanded_dataset, alpha) 
     else:
         m = dataset.shape[0]
         alpha = (indices/k - 1/m)
         reg = model.fit(dataset, alpha)
     return reg
 
-def getMPR(dataset, k=0, curation_set=None, model=None, indices=None):
+def getMPR(dataset, k=0, curation_set=None, modelname=None, indices=None):
     if indices is None:
         indices = np.ones(dataset.shape[0])
     k = int(np.sum(indices))
 
-    reg = oracle_function(indices, dataset, curation_set=curation_set, model=model)
+    reg = oracle_function(indices, dataset, curation_set=curation_set, modelname=modelname)
     if curation_set is not None:
         expanded_dataset = np.concatenate((dataset, curation_set), axis=0)
         m = curation_set.shape[0]
         c = reg.predict(expanded_dataset)
         c /= np.linalg.norm(c)
-        c *= np.sqrt(c.shape[0]) ## sqrt(n+m) = 141
+        # c *= np.sqrt(c.shape[0]) ## sqrt(n+m) = 141   
+        # print(np.sqrt(c.shape[0]), np.sqrt(m*k/(m+k)))
+        c *= np.sqrt(m*k/(m+k))
         mpr = np.abs(np.sum((indices/k)*c[:dataset.shape[0]]) - np.sum((1/m)*c[dataset.shape[0]:]))
     else:
         m = dataset.shape[0]
@@ -82,7 +99,7 @@ def feature_extraction(encoder, dataloader, args, query=True):
     elif args.vision_encoder == 'CLIP':
         return _clip_extraction(encoder, dataloader, args, query)
 
-
+# old version
 def _blip_extraction(encoder, dataloader, args, query=True):
     processor = BlipProcessor.from_pretrained("Salesforce/blip-vqa-base")
     raw_text=["What word best describes the person's appearance?"]
@@ -121,56 +138,82 @@ def _blip_extraction(encoder, dataloader, args, query=True):
     outputs = torch.cat(outputs)
     outputs = outputs.mean(axis=1)
     return outputs if not query else (outputs, torch.cat(professions))
+
+def group_estimation(features, vision_encoder_name):
+    path = '/n/holyscratch01/calmon_lab/Lab/datasets/mpr_stuffs/'    
+    with open(os.path.join(path,'clfs',f'fairface_{vision_encoder_name}_clf_age.pkl'), 'rb') as f:
+        clf_age = pickle.load(f)
+    with open(os.path.join(path,'clfs',f'fairface_{vision_encoder_name}_clf_gender.pkl'), 'rb') as f:
+        clf_gender = pickle.load(f)
+    with open(os.path.join(path,'clfs',f'fairface_{vision_encoder_name}_clf_race.pkl'), 'rb') as f:
+        clf_race = pickle.load(f)
+        
+    ages = clf_age.predict_proba(features)
+    genders = clf_gender.predict_proba(features)
+    races = clf_race.predict_proba(features)
+
+    outputs = np.concatenate((genders, ages, races), axis=1)
+    for i in range(outputs.shape[0]):
+        outputs[i, :] = outputs[i, :] / np.linalg.norm(outputs[i, :])
+
+    return outputs
+
+def compute_similarity(visual_features, profession_labels, profession_set, vision_encoder, vision_encoder_name='clip'):
+    if vision_encoder_name != 'CLIP':
+        raise ValueError('Only CLIP is supported for now')
+    similarity = np.zeros(visual_features.shape[0])
+
+    visual_features = visual_features / np.linalg.norm(visual_features, axis=-1, keepdims=True) 
+    vision_encoder.eval()
+    for i, profession in enumerate(profession_set):
+        with torch.no_grad():        
+            profession_idx = profession_labels == i
+            prompt = f'photo portrait of {profession}'
+            text = clip.tokenize(prompt)
+            if torch.cuda.is_available():
+                text = text.cuda()
+            text_embedding = vision_encoder.encode_text(text).float()
+            text_embedding = text_embedding.cpu().numpy().squeeze()
+            text_embedding = text_embedding / np.linalg.norm(text_embedding)
+            similarity[profession_idx] = visual_features[profession_idx] @ text_embedding
+    return similarity
     
 def _clip_extraction(encoder, dataloader, args, query=True):
     dataset_name = args.refer_dataset if not query else args.query_dataset
-    filename = f'./stuffs/{args.vision_encoder}_{dataset_name}_embedding.pkl'
-    if os.path.exists(filename):
-        with open(filename, 'rb') as f:
+    dataset_name += f'_{args.target_profession}' if args.target_profession != 'all' and query else ''
+    path = '/n/holyscratch01/calmon_lab/Lab/datasets/mpr_stuffs/'
+    filename = f'{dataset_name}_{args.vision_encoder}_embedding.pkl'
+    if query:
+        pre_name = f'query_embedding/{args.target_model}_' 
+        filename = pre_name + filename
+    else:
+        filename = f'refer_embedding/' + filename
+    print(os.path.join(path,filename))
+
+    if os.path.exists(os.path.join(path,filename)):
+        with open(os.path.join(path,filename), 'rb') as f:
             outputs =  pickle.load(f)
         print(f'embedding vectors of {dataset_name} are successfully loaded')
         return outputs
 
-    genders = []
-    ages = []
-    races = []
     professions = []
-
-    with open('stuffs/clf_age.pkl', 'rb') as f:
-        clf_age = pickle.load(f)
-    with open('stuffs/clf_gender.pkl', 'rb') as f:
-        clf_gender = pickle.load(f)
-    with open('stuffs/clf_race.pkl', 'rb') as f:
-        clf_race = pickle.load(f)
-
-    for batch in dataloader:
+    features = []
+    for batch in tqdm(dataloader):
         with torch.no_grad():
             image = batch[0]
             
             if torch.cuda.is_available():
                 image = image.cuda()
-            features = encoder.encode_image(image)            
-            features = features.cpu().numpy()
+            feature = encoder.encode_image(image)            
+            features.append(feature.cpu())
             
-            agelabels = clf_age.predict_proba(features)
-            genderlabels = clf_gender.predict_proba(features)
-            racelabels = clf_race.predict_proba(features)
-
-            ages.append(agelabels)
-            genders.append(genderlabels)
-            races.append(racelabels)
             if query:
                 professions.append(batch[1])
     
-    ages = np.concatenate(ages)
-    genders = np.concatenate(genders)
-    races = np.concatenate(races)
-    outputs = np.concatenate((genders, ages, races), axis=1)
+    features = torch.cat(features)
+    outputs = features.numpy()
 
-    for i in range(outputs.shape[0]):
-        outputs[i, :] = outputs[i, :] / np.linalg.norm(outputs[i, :])
-
-    with open(filename, 'wb') as f:
+    with open(os.path.join(path, filename), 'wb') as f:
         if query:
             pickle.dump((outputs, torch.cat(professions)), f)
         else:

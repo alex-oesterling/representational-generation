@@ -65,7 +65,6 @@ class GurobiIP():
                 print(self.problem.ObjVal)
         return gurobi_solution
 
-
     def max_similarity(self, c, k, rho, linear_constraint_index):
         sum_a_c = gp.quicksum([self.a[i] * c[:self.n][i] for i in range(self.n)])
         sum_c = gp.quicksum(c[self.n:])
@@ -73,7 +72,6 @@ class GurobiIP():
         self.problem.addConstr(((1/k)*sum_a_c - (1/self.m)*sum_c) >= -rho, name="neg_linear_constraint_{}".format(linear_constraint_index))
         self.problem.optimize()
         self.problem.update()
-
 
     def sup_function(self, a, k):
         curation_indicator = np.concatenate((np.zeros(a.shape[0]), np.ones(self.curation_set.shape[0])))
@@ -117,7 +115,8 @@ class GurobiLP():
         self.similarity_scores = similarity_scores.squeeze()
 
         if model is None:
-            self.model = LinearRegression()
+            # self.model = LinearRegression()
+            self.model = 'linear'
         else:
             self.model = model
 

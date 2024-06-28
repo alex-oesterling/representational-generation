@@ -72,15 +72,17 @@ class StableBiasProfession(GenericDataset):
         self.dataset = self.dataset.select(idx)
 
         self.profession_set = list(set(self.dataset['profession']))
+        self.profession_set.sort()
 
         # Original dataset contains generated samples from three diffreent models
-        if self.args.target_profession != 'all':
-            if self.args.target_profession not in self.profession_set:
-                raise ValueError(f"Profession {self.args.target_profession} not in dataset")
-            # self.dataset = self.dataset.filter(lambda x: x['profession'] == self.args.target_profession)
-            profession_list = self.dataset['profession']
-            idx = [i for i, x in enumerate(profession_list) if x == self.args.target_profession]
-            self.dataset = self.dataset.select(idx)
+        # if self.args.target_profession != 'all':
+        #     if self.args.target_profession not in self.profession_set:
+        #         raise ValueError(f"Profession {self.args.target_profession} not in dataset")
+        #     # self.dataset = self.dataset.filter(lambda x: x['profession'] == self.args.target_profession)
+        #     profession_list = self.dataset['profession']
+        #     idx = [i for i, x in enumerate(profession_list) if x == self.args.target_profession]
+        #     self.dataset = self.dataset.select(idx)
+        #     self.profession_set = [self.args.target_profession]
 
         self.processor = processor
         self.transform = transform

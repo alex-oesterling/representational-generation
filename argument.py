@@ -18,7 +18,10 @@ def get_args():
     
     # For retrieving the dataset
     parser.add_argument('--retrieve', default=False, action='store_true', help='retrieve the dataset')
-    parser.add_argument('--retriever', type=str, default='mapr', choices=['mapr', 'random'])
+    parser.add_argument('--retriever', type=str, default='mapr', choices=['mapr', 'random','knn', 'random_ratio'])
+    parser.add_argument('--functionclass', type=str, default='linear', choices=['linear','dt','nn','l2'], help='functionclass for mapr')
+    parser.add_argument('--max-depth', type=int, default=2, help='max depth for decision tree')
+    parser.add_argument('--ratio', type=float, default=1, help='ratio for random_ratio retriever')
     parser.add_argument('--k', type=int, default=20, help='the number of retrieved sample')
 
     # Hyperparameters used for each dataset

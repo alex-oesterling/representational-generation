@@ -4,6 +4,7 @@ from collections import defaultdict
 
 dataset_dict = {'stable_bias_i' : ['data_handler.stable_bias','StableBiasIdentity'],
                 'stable_bias_p' : ['data_handler.stable_bias','StableBiasProfession'],
+                'stable_bias_large' : ['data_handler.stable_bias_large','StableBiasProfession'],
                 'fairface' : ['data_handler.fairface','FairFace']
                }
 
