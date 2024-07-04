@@ -1,6 +1,9 @@
 import torch
 
 
+import torch
+
+
 class ModelFactory:
     def __init__(self):
         pass
@@ -17,8 +20,10 @@ class ModelFactory:
             from diffusers import StableDiffusionPipeline
             network = StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4", torch_dtype=torch.float16)
         elif modelname == 'SD_2':
-            from diffusers import StableDiffusionPipeline
-            network = StableDiffusionPipeline.from_pretrained("runwayml/stable-diffusion-v2-1", torch_dtype=torch.float16)
+            from diffusers import StableDiffusionPipeline, EulerDiscreteScheduler
+            model_id ="stabilityai/stable-diffusion-2-1-base"
+            scheduler = EulerDiscreteScheduler.from_pretrained(model_id, subfolder="scheduler")
+            network = StableDiffusionPipeline.from_pretrained(model_id, scheduler=scheduler, torch_dtype=torch.float16)
         else:
             raise NotImplementedError
 

@@ -9,9 +9,10 @@ from utils import getMPR
 class Retriever(GenericRetriever):
     def __init__(self, **kwargs):
         GenericRetriever.__init__(self, **kwargs)
+        self.cutting_planes = self.args.cutting_planes
+        self.n_rhos = self.args.n_rhos
 
     def retrieve(self, retrieval_labels, curated_labels, k=10, s=None):
-        cutting_planes = 50
         m = retrieval_labels.shape[0]
 
         # compute similarities
@@ -39,11 +40,11 @@ class Retriever(GenericRetriever):
         basic_mpr, _ = getMPR(retrieval_labels, k, curated_labels, self.args.functionclass, indices)
         print("basic mpr", basic_mpr)
 
-        rhos = np.linspace(0, basic_mpr, 30)
+        rhos = np.linspace(0, basic_mpr, self.n_rhos)
 
         for rho in rhos[::-1]:
             print('rho : ', rho)
-            indices = solver2.fit(k, cutting_planes, rho, indices)
+            indices = solver2.fit(k, self.cutting_planes, rho, indices)
             if indices is None:
                 break
             sparsity = sum(indices>1e-4)
@@ -52,13 +53,12 @@ class Retriever(GenericRetriever):
             indices_rounded[indices_rounded>1e-5] = 1.0 
 
             # rep = solver2.get_representation(indices, k)
-            rep = getMPR(retrieval_labels, k, curated_labels, self.args.functionclass, indices)
+            rep, _ = getMPR(retrieval_labels, k, curated_labels, self.args.functionclass, indices)
             sim = solver2.get_similarity(indices)
 
             # rounded_rep = solver2.get_representation(indices_rounded, k)
             rounded_sim = solver2.get_similarity(indices_rounded)
             rounded_rep,_ = getMPR(retrieval_labels, k, curated_labels, self.args.functionclass, indices_rounded)
-
             reps_relaxed.append(rep)
             sims_relaxed.append(sim)
             rounded_reps_final.append(rounded_rep)
@@ -83,4 +83,5 @@ class Retriever(GenericRetriever):
         print("final mprs", rounded_reps_final)
         print("final sims", rounded_sims_final)
 
-        return rounded_indices_list[-1], reps_relaxed, rounded_sims_final
+        # return rounded_indices_list[-1], reps_relaxed, rounded_sims_final
+        return rounded_indices_list[-1], rounded_reps_final, rounded_sims_final

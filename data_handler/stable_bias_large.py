@@ -22,7 +22,7 @@ class StableBiasProfession(GenericDataset):
         filenames_id = [int(f.split('.')[0]) for f in self.filenames]
         filenames_id = np.argsort(filenames_id)
         self.filenames = self.filenames[filenames_id]
-        self.filenames = self.filenames[:15000]
+        # self.filenames = self.filenames[:15000]
         print(self.filenames)
 
         self.profession_set = [self.args.target_profession]

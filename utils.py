@@ -11,15 +11,14 @@ from tqdm import tqdm
 import clip
 
 def make_result_path(args):
-    filename = f'{args.query_dataset}_{args.refer_dataset}_{args.vision_encoder}_{args.target_model}_{args.functionclass}'
-    if args.retriever != 'random_ratio':
-        filename += f'_{args.retriever}_{args.k}' if args.retrieve else ''
-    else:
-        filename += f'_{args.retriever}_{args.ratio}' if args.retrieve else ''
+    # filename = f'{args.query_dataset}_{args.refer_dataset}_{args.vision_encoder}_{args.target_model}_{args.functionclass}'
+    # if args.retriever != 'random_ratio':
+    #     filename += f'_{args.retriever}_{args.k}' if args.retrieve else ''
+    # else:
+    #     filename += f'_{args.retriever}_{args.ratio}' if args.retrieve else ''
     save_dir = os.path.join(args.save_dir, args.date)
     check_log_dir(save_dir)
-    
-    return os.path.join(save_dir, filename)
+    return save_dir
 
 def check_log_dir(log_dir):
     try:
@@ -139,23 +138,29 @@ def _blip_extraction(encoder, dataloader, args, query=True):
     outputs = outputs.mean(axis=1)
     return outputs if not query else (outputs, torch.cat(professions))
 
-def group_estimation(features, vision_encoder_name):
-    path = '/n/holyscratch01/calmon_lab/Lab/datasets/mpr_stuffs/'    
-    with open(os.path.join(path,'clfs',f'fairface_{vision_encoder_name}_clf_age.pkl'), 'rb') as f:
-        clf_age = pickle.load(f)
-    with open(os.path.join(path,'clfs',f'fairface_{vision_encoder_name}_clf_gender.pkl'), 'rb') as f:
-        clf_gender = pickle.load(f)
-    with open(os.path.join(path,'clfs',f'fairface_{vision_encoder_name}_clf_race.pkl'), 'rb') as f:
-        clf_race = pickle.load(f)
+def group_estimation(features, vision_encoder_name, group=['gender','age','race']):
+    path = '/n/holyscratch01/calmon_lab/Lab/datasets/mpr_stuffs/'
+    estimated_group_list = []
+    for g in group:
+        with open(os.path.join(path,'clfs',f'fairface_{vision_encoder_name}_clf_{g}.pkl'), 'rb') as f:
+            clf = pickle.load(f)
+            estimated_group = clf.predict_proba(features)
+            estimated_group_list.append(estimated_group)
+
+    # with open(os.path.join(path,'clfs',f'fairface_{vision_encoder_name}_clf_gender.pkl'), 'rb') as f:
+        # clf_gender = pickle.load(f)
+    # with open(os.path.join(path,'clfs',f'fairface_{vision_encoder_name}_clf_race.pkl'), 'rb') as f:
+        # clf_race = pickle.load(f)
         
-    ages = clf_age.predict_proba(features)
-    genders = clf_gender.predict_proba(features)
-    races = clf_race.predict_proba(features)
-
-    outputs = np.concatenate((genders, ages, races), axis=1)
-    for i in range(outputs.shape[0]):
-        outputs[i, :] = outputs[i, :] / np.linalg.norm(outputs[i, :])
-
+    # ages = clf_age.predict_proba(features)
+    # genders = clf_gender.predict_proba(features)
+    # races = clf_race.predict_proba(features)
+    if len(estimated_group_list) > 1:
+        outputs = np.concatenate(estimated_group_list, axis=1)
+    else:
+        outputs = np.array(estimated_group_list[0])
+    # for i in range(outputs.shape[0]):
+        # outputs[i, :] = outputs[i, :] / np.linalg.norm(outputs[i, :])
     return outputs
 
 def compute_similarity(visual_features, profession_labels, profession_set, vision_encoder, vision_encoder_name='clip'):
