@@ -20,7 +20,7 @@ def main():
     parser.add_argument('--model', type=str, default='SD_14')
     parser.add_argument('--profession', type=str, default='firefighter')
     parser.add_argument('--group', type=str, nargs='+', default=['gender','age','race'])
-    parser.add_argument('--n-generations', type=int, default=10000)
+    parser.add_argument('--n-generation', type=int, default=10000)
 
     args = parser.parse_args()
 
@@ -95,7 +95,7 @@ def main():
     img_num = 0
     n_subgroup = defaultdict(int)
 
-    while img_num < args.n_generations:
+    while img_num < args.n_generation:
         print(f'n_generation : {args.n_generation}, img_num : {img_num}')
         # choose group
         flat_index = np.random.choice(a=group_prob.size, p=group_prob.flatten())

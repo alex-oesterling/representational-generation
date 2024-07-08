@@ -18,6 +18,7 @@ class StableBiasProfession(GenericDataset):
         
         self.path = f'/n/holyscratch01/calmon_lab/Lab/datasets/{self.args.target_model}/{self.args.target_profession}'
         self.filenames = os.listdir(self.path)
+        self.filenames = [f for f in self.filenames if f.endswith('.png')]
         self.filenames = np.array(self.filenames)
         filenames_id = [int(f.split('.')[0]) for f in self.filenames]
         filenames_id = np.argsort(filenames_id)

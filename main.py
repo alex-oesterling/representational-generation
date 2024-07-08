@@ -14,7 +14,8 @@ import data_handler
 import networks
 import trainer
 import retriever
-from utils import set_seed, getMPR, feature_extraction, make_result_path, group_estimation, compute_similarity
+from utils import set_seed, getMPR, feature_extraction, make_result_path, group_estimation, compute_similarity, check_log_dir
+
 
 def eval(args):
 
@@ -40,8 +41,7 @@ def eval(args):
     
     if args.retrieve:
         _retriever = retriever.RetrieverFactory.get_retriever(args.retriever, args)
-        s = compute_similarity(query_embedding, profession_labels, profession_set, vision_encoder, args.vision_encoder)
-
+    
     if args.pool_size != 1.0:
         total = query_embedding.shape[0]
         if args.pool_size < 1:
@@ -49,14 +49,17 @@ def eval(args):
         else:
             n_samples = int(args.pool_size)
         idx = np.random.choice(total, n_samples, replace=False)
+        query_embedding = query_embedding[idx]
         query_g_embedding = query_g_embedding[idx]
-        if args.retrieve:
-            s = s[idx]
         profession_labels = profession_labels[idx]
         print('Pool size is reduced to ', args.pool_size)
-    
+
+    # compute CLIP similarity
+    s = compute_similarity(query_embedding, profession_labels, profession_set, vision_encoder, args.vision_encoder)        
         
+    # compute MPR
     MPR_dic = {}
+    norMPR_dic = {}
     score_dic = {}
     idx_dic = {}
     for i, profession in enumerate(profession_set):
@@ -65,29 +68,32 @@ def eval(args):
 
         profession_idx = profession_labels == i
         if args.retrieve:
-            idx, MPR_list, score_list = _retriever.retrieve(query_g_embedding[profession_idx], refer_g_embedding, k=args.k, s=s[profession_idx])
+            idx, MPR_list, noretrieve_MPR_list, score_list = _retriever.retrieve(query_g_embedding[profession_idx], refer_g_embedding, k=args.k, s=s[profession_idx])
             # score = np.sum(s[profession_idx][idx.astype(dtype=bool)])
             idx_dic[profession] = idx
             MPR_dic[profession] = MPR_list
             score_dic[profession] = score_list
-            print(f'Profession: {profession}, MPR: {MPR_list[-1]}, score: {score_list[-1]}')
+            norMPR_dic[profession] = noretrieve_MPR_list
+            print(f'Profession: {profession}, MPR: {noretrieve_MPR_list[-1]}, score: {score_list[-1]}')
             
         else:
             idx = None                
-            # score = np.sum(s[profession_idx])
+            score = np.sum(s[profession_idx])
             MPR, c = getMPR(query_g_embedding[profession_idx], curation_set=refer_g_embedding, indices=idx, modelname=args.functionclass)
             MPR_dic[profession] = MPR
-            # score[profession] = score
-            print(f'Profession: {profession}, final MPR: {MPR}')
+            score_dic[profession] = score
+            print(f'Profession: {profession}, final MPR: {MPR}, score: {score}')
 
     log_path =  make_result_path(args)
     filename = args.time + '_' + wandb.run.id
     with open(os.path.join(log_path,filename+'_MPR.pkl'), 'wb') as f:
         pickle.dump(MPR_dic, f)
+    with open(os.path.join(log_path,filename+'_score.pkl'), 'wb') as f:
+        pickle.dump(score_dic, f)
     
     if args.retrieve:
-        with open(os.path.join(log_path,filename+'_score.pkl'), 'wb') as f:
-                    pickle.dump(score_dic, f)
+        with open(os.path.join(log_path,filename+'_norMPR.pkl'), 'wb') as f:
+            pickle.dump(norMPR_dic, f)
         with open(os.path.join(log_path,filename+'_idx.pkl'), 'wb') as f:
             pickle.dump(idx_dic, f)
 
@@ -97,11 +103,22 @@ def eval(args):
 
 
 def train(args):
-    train_loader, val_loader, test_loader = data_handler.DataloaderFactory.get_dataloader(dataname=args.refer_dataset, args=args)
+    # train_loader, test_loader = data_handler.DataloaderFactory.get_dataloader(dataname=args.refer_dataset, args=args)
 
-    dm = networks.ModelFactory.get_model(modelname=args.model)
+    dm = networks.ModelFactory.get_model(modelname=args.target_model)
 
+    _trainer = trainer.TrainerFactory.get_trainer(trainername=args.trainer, model=dm, args=args)
+    _trainer.train()
 
+    model =_trainer.model
+    # save model
+    save_dir = f'trained_models/{args.trainer}'
+    check_log_dir(save_dir)
+
+    groupname = [_g[0] for _g in args.group]
+    groupname = "".join(groupname)
+    filename = f'{args.date}_{groupname}'
+    torch.save(model, os.path.join(save_dir, f'{filename}.pt'))
 
     # if args.save_model:
     #     args_, save_dir, log_name = check_dirs(args_)
@@ -117,7 +134,6 @@ def train(args):
 
     # wandb.finish()
 
-
 if __name__ == '__main__':
 
     args = get_args()    
@@ -130,7 +146,7 @@ if __name__ == '__main__':
     now = datetime.datetime.now()
     # Format as 'ddmmyyHMS'
     formatted_time = now.strftime('%H%M')
-    if args.date != 'test':
+    if args.date == 'default':
         args.date = now.strftime('%m%d%y')
     args.time = formatted_time
 
@@ -149,4 +165,4 @@ if __name__ == '__main__':
     else:
         eval(args)
 
-    wandb.finish()
+    # wandb.finish()

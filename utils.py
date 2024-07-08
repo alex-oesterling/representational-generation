@@ -179,6 +179,7 @@ def compute_similarity(visual_features, profession_labels, profession_set, visio
                 text = text.cuda()
             text_embedding = vision_encoder.encode_text(text).float()
             text_embedding = text_embedding.cpu().numpy().squeeze()
+            
             text_embedding = text_embedding / np.linalg.norm(text_embedding)
             similarity[profession_idx] = visual_features[profession_idx] @ text_embedding
     return similarity

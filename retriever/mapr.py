@@ -34,6 +34,7 @@ class Retriever(GenericRetriever):
         rounded_sims_final = []
         relaxed_indices_list = []
         rounded_indices_list = []
+        noretrieve_mapr_list = []
 
         indices = top_indices        
         
@@ -59,13 +60,19 @@ class Retriever(GenericRetriever):
             # rounded_rep = solver2.get_representation(indices_rounded, k)
             rounded_sim = solver2.get_similarity(indices_rounded)
             rounded_rep,_ = getMPR(retrieval_labels, k, curated_labels, self.args.functionclass, indices_rounded)
+
+            _r = retrieval_labels[indices_rounded==1.0]
+            noretrieve_mpr,_ = getMPR(_r, k, curated_labels, self.args.functionclass)
             reps_relaxed.append(rep)
             sims_relaxed.append(sim)
             rounded_reps_final.append(rounded_rep)
+            noretrieve_mapr_list.append(noretrieve_mpr)
             rounded_sims_final.append(rounded_sim)
+
             sparsities.append(sparsity)
             rounded_indices_list.append(indices_rounded)
             relaxed_indices_list.append(indices)
+            
 
             # indices_gurobi = solver.fit(k, cutting_planes, rho)
             # if indices_gurobi is None:
@@ -84,4 +91,4 @@ class Retriever(GenericRetriever):
         print("final sims", rounded_sims_final)
 
         # return rounded_indices_list[-1], reps_relaxed, rounded_sims_final
-        return rounded_indices_list[-1], rounded_reps_final, rounded_sims_final
+        return rounded_indices_list, rounded_reps_final,noretrieve_mapr_list, rounded_sims_final

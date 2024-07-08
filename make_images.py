@@ -34,22 +34,33 @@ def main():
     professions = ['firefighter','CEO','musician']
     # professions=['CEO']
     for profession in professions:
-        path = os.path.join(base_path, profession)
+        path = os.path.join(base_path, profession, 'no_adjective')
         check_log_dir(path)
         img_num = 0        
-        for adjective in adjectives:
-            if profession == 'firefighter' and adjective in ['ambitious','assertive','committed','compassionate']:
-                img_num += 1000
-                continue
-            print(f"Generating images for {adjective} {profession}")
-            # if img_num<15000:
-                # img_num += 1000
-                # continue
-            for i in range(1000):
-                images = model(prompt=f"Photo portrait of a {adjective} {profession}", num_images_per_prompt=10, gen=gen).images
-                for j, image in enumerate(images):
-                    image.save(f"{path}/{img_num}.png")
-                    img_num += 1
+        # for adjective in adjectives:
+        #     if profession == 'firefighter' and adjective in ['ambitious','assertive','committed','compassionate']:
+        #         img_num += 1000
+        #         continue
+        #     print(f"Generating images for {adjective} {profession}")
+        #     # if img_num<15000:
+        #         # img_num += 1000
+        #         # continue
+        #     for i in range(100):
+        #         images = model(prompt=f"Photo portrait of a {adjective} {profession}", num_images_per_prompt=10, gen=gen).images
+        #         for j, image in enumerate(images):
+        #             image.save(f"{path}/{img_num}.png")
+        #             img_num += 1
+
+        print(f"Generating images for {profession}")
+        # if img_num<15000:
+            # img_num += 1000
+            # continue
+        for i in range(2100):
+            images = model(prompt=f"Photo portrait of a {profession}", num_images_per_prompt=10, gen=gen).images
+            for j, image in enumerate(images):
+                image.save(f"{path}/{img_num}.png")
+                img_num += 1
+
     
     ## save
 
