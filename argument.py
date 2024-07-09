@@ -8,9 +8,8 @@ def get_args():
     parser.add_argument('--n-workers', type=int, default=1)
     
     # For coupmting MPR
-    parser.add_argument('--refer-dataset', type=str, default='fairface', choices=['fairface', 'stable_bias_i'])
-    parser.add_argument('--query-dataset', type=str, default='CLIP')
-    parser.add_argument('--dataset-path', type=str, default=None, help='it is only used when query-dataset is general')
+    parser.add_argument('--refer-dataset', type=str, default='fairface', choices=['fairface', 'stable_bias_i', 'finetune'])
+    parser.add_argument('--query-dataset', type=str, default='CLIP', choices=['CLIP', 'finetune'])
     parser.add_argument('--vision-encoder', type=str, default='CLIP', 
                         choices = ['BLIP', 'CLIP', 'PATHS'])
     parser.add_argument('--target-profession', type=str, default='all')
@@ -27,7 +26,6 @@ def get_args():
     parser.add_argument('--pool-size', type=float, default=1.0)
     parser.add_argument('--k', type=int, default=20, help='the number of retrieved sample')
 
-
     # mapr hyperparameters
     parser.add_argument('--cutting_planes', type=int, default=50, help='the number of cutting planes in LP')
     parser.add_argument('--n_rhos', type=int, default=30, help='the number of constraint problems')
@@ -37,16 +35,9 @@ def get_args():
 
     # Hyperparameters for training
     parser.add_argument('--train', default=False, action='store_true', help='train the model')
-    parser.add_argument('--trainer', default='scratch', type=str, help='choose the trainer')
     parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
-    parser.add_argument('-wd', '--weight_decay', default=0.0, type=float, help='weight_decay')    
-    parser.add_argument('--n-iters', default=50, type=int, help='total iterations')
-
     parser.add_argument('--epochs', type=int, default=10, help='number of epochs')
     parser.add_argument('--batch-size', type=int, default=256)
-    parser.add_argument('--method', type=str, default=None, help='method to mitigate unfairness')
-    parser.add_argument('--optimizer', type=str, default='adamw', help='optimizer')
-    parser.add_argument('--lr-scheduler', type=str, default='cosine', help='scheduler')
 
     # Info for result file names 
     parser.add_argument('--date', type=str, default='default', help='date when to save')
