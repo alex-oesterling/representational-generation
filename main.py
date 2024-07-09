@@ -165,4 +165,4 @@ if __name__ == '__main__':
     else:
         eval(args)
 
-    # wandb.finish()
+    wandb.finish()

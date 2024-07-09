@@ -35,6 +35,15 @@ def set_seed(seed):
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
+def get_current_device():
+    if torch.cuda.is_available():
+        # Determine the GPU used by the current process
+        cur_device = torch.cuda.current_device()
+    else:
+        cur_device = torch.device('cpu')
+    return cur_device
+
+
 def oracle_function(indices, dataset, curation_set=None, modelname='linear'):
     if modelname == 'linear':
         model = LinearRegression()
@@ -145,6 +154,8 @@ def group_estimation(features, vision_encoder_name, group=['gender','age','race'
         with open(os.path.join(path,'clfs',f'fairface_{vision_encoder_name}_clf_{g}.pkl'), 'rb') as f:
             clf = pickle.load(f)
             estimated_group = clf.predict_proba(features)
+            one_hot_indices = np.argmax(estimated_group, axis=1)
+            estimated_group = np.eye(estimated_group.shape[1])[one_hot_indices]            
             estimated_group_list.append(estimated_group)
 
     # with open(os.path.join(path,'clfs',f'fairface_{vision_encoder_name}_clf_gender.pkl'), 'rb') as f:
@@ -168,7 +179,7 @@ def compute_similarity(visual_features, profession_labels, profession_set, visio
         raise ValueError('Only CLIP is supported for now')
     similarity = np.zeros(visual_features.shape[0])
 
-    visual_features = visual_features / np.linalg.norm(visual_features, axis=-1, keepdims=True) 
+    # visual_features = visual_features / np.linalg.norm(visual_features, axis=-1, keepdims=True) 
     vision_encoder.eval()
     for i, profession in enumerate(profession_set):
         with torch.no_grad():        
@@ -210,7 +221,7 @@ def _clip_extraction(encoder, dataloader, args, query=True):
             
             if torch.cuda.is_available():
                 image = image.cuda()
-            feature = encoder.encode_image(image)            
+            feature = encoder.encode_image(image)
             features.append(feature.cpu())
             
             if query:
@@ -247,3 +258,72 @@ def statEmbedding(embeddings):
     return mean_embedding, std_embedding
 
 # def getMPR(indices, labels, oracle, k, m):
+
+
+def gpu_mem_usage():
+    """Computes the GPU memory usage for the current device (GB)."""
+    if not torch.cuda.is_available():
+        return 0
+    # Number of bytes in a megabyte
+    _B_IN_GB = 1024 * 1024 * 1024
+
+    mem_usage_bytes = torch.cuda.max_memory_allocated()
+    return mem_usage_bytes / _B_IN_GB
+
+class AverageMeter(object):
+    """Computes and stores the average and current value"""
+    def __init__(self, name, weight=1.0, n_attr=2, fmt=':f'):
+        self.name = name
+        self.n_attr = n_attr
+        self.fmt = fmt
+        self.reset()
+        self.weight = weight
+        self.updated_step = -1
+
+    def reset(self):
+        self.val = torch.Tensor([0] * self.n_attr)
+        self.avg = torch.Tensor([0] * self.n_attr)
+        self.sum = torch.Tensor([0] * self.n_attr)
+        self.count = 0
+        self.cur_count = 0
+        self.updated_step = -1
+
+    def update(self, val):
+        self.val += val
+        self.sum += val
+        self.count += val.sum()
+        self.cur_count += val.sum()
+        self.avg = self.sum / self.count
+
+    def step(self):
+        self.val = torch.Tensor([0] * self.n_attr)
+        self.sum *= self.weight
+        self.count *= self.weight
+        self.cur_count = 0
+        self.avg = self.sum / self.count
+
+    def get_val(self):
+        return self.val / (self.val.sum() + 1e-8)
+
+    def get_discrepancy(self, target_ratio=None):
+        if target_ratio is None:
+            target_ratio = 1 / self.n_attr
+        return max(self.get_val()-target_ratio) - min(self.get_val()-target_ratio)
+
+    def get_mse(self, target_ratio=None):
+        if target_ratio is None:
+            target_ratio = 1 / self.n_attr
+        return torch.mean((self.get_val() - target_ratio)**2)
+
+    def __str__(self):
+        val = ' '.join(['{:.3f}'.format(v) for v in self.val / self.val.sum()])
+        avg = ' '.join(['{:.3f}'.format(a) for a in self.avg])
+        log_str = "{} r: {} (# of current images: {}) (weighted r: {})"\
+            .format(self.name, val, self.cur_count, avg)
+        return log_str
+
+    def copy(self, meter):
+        self.val = meter.val
+        self.avg = meter.avg
+        self.sum = meter.sum
+        self.count = meter.count

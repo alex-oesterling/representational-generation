@@ -65,7 +65,7 @@ class General(GenericDataset):
             raise ValueError(f"The model ({target_model}) in the data path and the target model ({self.args.target_model}) are not matching")
         
         if self.args.trainer != trainer:
-            raise ValueError(f"The trainer ({trainer}) in the data path and the trainer ({self.trainer}) are not matching")
+            raise ValueError(f"The trainer ({trainer}) in the data path and the trainer ({self.args.trainer}) are not matching")
 
         args_group_name = "".join([_g[0].upper() for _g in self.args.group])        
         if self.args.trainer != 'scratch':

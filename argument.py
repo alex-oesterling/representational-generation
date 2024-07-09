@@ -37,11 +37,16 @@ def get_args():
 
     # Hyperparameters for training
     parser.add_argument('--train', default=False, action='store_true', help='train the model')
-    parser.add_argument('--trainer', default='uce', type=str, help='choose the trainer')
+    parser.add_argument('--trainer', default='scratch', type=str, help='choose the trainer')
     parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
+    parser.add_argument('-wd', '--weight_decay', default=0.0, type=float, help='weight_decay')    
+    parser.add_argument('--n-iters', default=50, type=int, help='total iterations')
+
     parser.add_argument('--epochs', type=int, default=10, help='number of epochs')
     parser.add_argument('--batch-size', type=int, default=256)
     parser.add_argument('--method', type=str, default=None, help='method to mitigate unfairness')
+    parser.add_argument('--optimizer', type=str, default='adamw', help='optimizer')
+    parser.add_argument('--lr-scheduler', type=str, default='cosine', help='scheduler')
 
     # Info for result file names 
     parser.add_argument('--date', type=str, default='default', help='date when to save')
