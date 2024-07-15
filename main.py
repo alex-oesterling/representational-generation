@@ -7,6 +7,7 @@ from argument import get_args
 import pickle
 import wandb
 
+import sys
 import os
 os.environ["WANDB_MODE"]="offline"
 
@@ -135,6 +136,21 @@ def train(args):
     # wandb.finish()
 
 if __name__ == '__main__':
+
+    print(" ".join(sys.argv))
+
+    # check gpu
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print('Using device:', device)
+    print()
+
+    # Print out additional information when using CUDA
+    if device.type == 'cuda':
+        print(torch.cuda.get_device_name(0))
+        print('Memory Usage:')
+        print('Allocated:', round(torch.cuda.memory_allocated(0)/1024**3,1), 'GB')
+        print('Reserved: ', round(torch.cuda.memory_reserved(0)/1024**3,1), 'GB')
+        print()
 
     args = get_args()    
 

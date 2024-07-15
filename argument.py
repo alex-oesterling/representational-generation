@@ -11,11 +11,12 @@ def get_args():
     parser.add_argument('--refer-dataset', type=str, default='fairface', choices=['fairface', 'stable_bias_i'])
     parser.add_argument('--query-dataset', type=str, default='CLIP')
     parser.add_argument('--dataset-path', type=str, default=None, help='it is only used when query-dataset is general')
+    parser.add_argument('--p-ver', type=str, default='v1', help='version of prompts used for generating')
     parser.add_argument('--vision-encoder', type=str, default='CLIP', 
                         choices = ['BLIP', 'CLIP', 'PATHS'])
     parser.add_argument('--target-profession', type=str, default='all')
     parser.add_argument('--target-model', type=str, default='SD_14', #required=True, 
-                        choices = ['SD_14','SD_2', 'DallE'])
+                        choices = ['SD_14','SD_2', 'SDXL', 'DallE'])
     parser.add_argument('--group', type=str, nargs='+', default=['gender','age','race'])    
     
     # For retrieving the dataset

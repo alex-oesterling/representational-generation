@@ -12,7 +12,7 @@ class FairFace(GenericDataset):
     def __init__(self, transform=None, processor=None, **kwargs):
     # transform=torchvision.transforms.ToTensor(), embedding_model=None, binarize_age=True):
         GenericDataset.__init__(self, **kwargs)
-        self.filepath = os.path.join(self.root, 'fairface')
+        self.datapath = os.path.join(self.root, 'tmp_fairface')
         self.processor = processor
         self.transform = transform
 
@@ -25,9 +25,9 @@ class FairFace(GenericDataset):
         ]
 
         if self.split=='train':
-            df = pd.read_csv(self.filepath + "/fairface_label_train.csv")
+            df = pd.read_csv(self.datapath + "/fairface_label_train.csv")
         else:
-            df = pd.read_csv(self.filepath + "/fairface_label_val.csv")
+            df = pd.read_csv(self.datapath + "/fairface_label_val.csv")
 
         self.race_to_idx = {}
         for i, race in enumerate(df.race.unique()):
@@ -64,9 +64,8 @@ class FairFace(GenericDataset):
             self.labels.append([gender_idx[i], age_idx[i]] + list(one_hot[i]))
 
         self.labels = torch.tensor(self.labels)
-        print(self.labels.shape)
 
-        # construct_path = lambda x: os.path.join(self.filepath, x)
+        # construct_path = lambda x: os.path.join(self.datapath, x)
         self.img_paths = df.file.to_list()
 
         print(self.labeltags)
@@ -78,10 +77,10 @@ class FairFace(GenericDataset):
         # if self.embedding_model is not None:
         #     path = self.img_paths[idx]
         #     image_id = path.split(".")[0]
-        #     embeddingpath = os.path.join(self.filepath, self.embedding_model, image_id+".pt")
+        #     embeddingpath = os.path.join(self.datapath, self.embedding_model, image_id+".pt")
         #     return torch.load(embeddingpath), self.labels[idx]
         
-        path = os.path.join(self.filepath, self.img_paths[idx])
+        path = os.path.join(self.datapath, self.img_paths[idx])
         image = Image.open(path)
         if self.transform is not None:
             image = self.transform(image)

@@ -50,7 +50,7 @@ def main():
     print("Model loaded")
 
     gen = torch.Generator(device=device)
-    gen.manual_seed(1)
+    gen.manual_seed(4)
 
     file = open("adjectives.txt", "r") 
     data = file.read() 
@@ -83,7 +83,7 @@ def main():
         edit_weights.extend([2/len(group_dic[group])]*len(group_dic[group]))
 
     num_prompt = len(prompt_list)
-    reverse_editing_direction = [False]*num_prompt
+    reverse_editing_direction = [True]*num_prompt
     edit_warmup_steps=[10]*num_prompt # Warmup period for each concept
     edit_guidance_scale=[4]*num_prompt # Guidance scale for each concept
     edit_threshold=[0.95]*num_prompt # Threshold for each concept. Threshold equals the percentile of the latent space that will be discarded. I.e. threshold=0.99 uses 1% of the latent dimensions
@@ -92,11 +92,11 @@ def main():
 
     path = os.path.join(base_path, args.profession)
     check_log_dir(path)
-    img_num = 0
+    img_num = 9855
     n_subgroup = defaultdict(int)
 
     while img_num < args.n_generations:
-        print(f'n_generation : {args.n_generation}, img_num : {img_num}')
+        print(f'n_generation : {args.n_generations}, img_num : {img_num}')
         # choose group
         flat_index = np.random.choice(a=group_prob.size, p=group_prob.flatten())
         idxs = np.unravel_index(flat_index, group_prob.shape)
@@ -106,14 +106,14 @@ def main():
         _reverse_editing_direction = copy(reverse_editing_direction)
         pos = 0
         for i, group in enumerate(args.group):
-            _reverse_editing_direction[pos+idxs[i]] = True
+            _reverse_editing_direction[pos+idxs[i]] = False
             pos += len(group_dic[group])
 
         #choose adjective
         adj_idx = np.random.choice(a=adjectives.size)
         adjective = adjectives[adj_idx]
 
-        out = pipe(prompt=f'Portrait face of a {adjective} {args.profession}', num_images_per_prompt=5, guidance_scale=7.5,gen=gen,
+        out = pipe(prompt=f'Portrait face of a {adjective} {args.profession}', num_images_per_prompt=5, guidance_scale=7.5,generator=gen,
                 editing_prompt=prompt_list, 
                 reverse_editing_direction=_reverse_editing_direction, # Direction of guidance i.e. decrease the first and increase the second concept
                 edit_warmup_steps=edit_warmup_steps, # Warmup period for each concept
@@ -121,7 +121,8 @@ def main():
                 edit_threshold=edit_threshold, # Threshold for each concept. Threshold equals the percentile of the latent space that will be discarded. I.e. threshold=0.99 uses 1% of the latent dimensions
                 edit_momentum_scale=0.3, # Momentum scale that will be added to the latent guidance
                 edit_mom_beta=0.6, # Momentum beta
-                edit_weights=edit_weights # Weights of the individual concepts against each other
+                # edit_weights=edit_weights # Weights of the individual concepts against each other
+                edit_weights=[1]*11
                 )
         images = out.images
         for j, image in enumerate(images):

@@ -154,8 +154,8 @@ def group_estimation(features, vision_encoder_name, group=['gender','age','race'
         with open(os.path.join(path,'clfs',f'fairface_{vision_encoder_name}_clf_{g}.pkl'), 'rb') as f:
             clf = pickle.load(f)
             estimated_group = clf.predict_proba(features)
-            one_hot_indices = np.argmax(estimated_group, axis=1)
-            estimated_group = np.eye(estimated_group.shape[1])[one_hot_indices]            
+            # one_hot_indices = np.argmax(estimated_group, axis=1)
+            # estimated_group = np.eye(estimated_group.shape[1])[one_hot_indices]            
             estimated_group_list.append(estimated_group)
 
     # with open(os.path.join(path,'clfs',f'fairface_{vision_encoder_name}_clf_gender.pkl'), 'rb') as f:
@@ -179,7 +179,7 @@ def compute_similarity(visual_features, profession_labels, profession_set, visio
         raise ValueError('Only CLIP is supported for now')
     similarity = np.zeros(visual_features.shape[0])
 
-    # visual_features = visual_features / np.linalg.norm(visual_features, axis=-1, keepdims=True) 
+    visual_features = visual_features / np.linalg.norm(visual_features, axis=-1, keepdims=True) 
     vision_encoder.eval()
     for i, profession in enumerate(profession_set):
         with torch.no_grad():        
@@ -197,20 +197,21 @@ def compute_similarity(visual_features, profession_labels, profession_set, visio
     
 def _clip_extraction(encoder, dataloader, args, query=True):
     dataset_name = args.refer_dataset if not query else args.query_dataset
-    dataset_name += f'_{args.target_profession}' if args.target_profession != 'all' and query else ''
-    path = '/n/holyscratch01/calmon_lab/Lab/datasets/mpr_stuffs/'
-    filename = f'{dataset_name}_{args.vision_encoder}_embedding.pkl'
-    if query:
-        pre_name = f'query_embedding/{args.target_model}_' 
-        filename = pre_name + filename
-    else:
-        filename = f'refer_embedding/' + filename
+    # dataset_name += f'_{args.target_profession}' if args.target_profession != 'all' and query else ''
+    # path = '/n/holyscratch01/calmon_lab/Lab/datasets/mpr_stuffs/'
+    path = dataloader.dataset.datapath
+    filename = f'{args.vision_encoder}_embedding.pkl'
+    # if query:
+    #     pre_name = f'query_embedding/{args.target_model}_' 
+    #     filename = pre_name + filename
+    # else:
+    #     filename = f'refer_embedding/' + filename
     print(os.path.join(path,filename))
 
     if os.path.exists(os.path.join(path,filename)):
         with open(os.path.join(path,filename), 'rb') as f:
             outputs =  pickle.load(f)
-        print(f'embedding vectors of {dataset_name} are successfully loaded')
+        print(f'embedding vectors of {dataset_name} are successfully loaded in {path}')
         return outputs
 
     professions = []

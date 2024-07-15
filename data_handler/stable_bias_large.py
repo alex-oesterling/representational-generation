@@ -16,8 +16,8 @@ class StableBiasProfession(GenericDataset):
         if self.args.target_profession not in ['firefighter', 'CEO', 'musician']:
             raise ValueError(f"Profession {self.args.target_profession} not in dataset")
         
-        self.path = f'/n/holyscratch01/calmon_lab/Lab/datasets/{self.args.target_model}/{self.args.target_profession}'
-        self.filenames = os.listdir(self.path)
+        self.datapath = f'/n/holyscratch01/calmon_lab/Lab/datasets/{self.args.target_model}/{self.args.target_profession}'
+        self.filenames = os.listdir(self.datapath)
         self.filenames = [f for f in self.filenames if f.endswith('.png')]
         self.filenames = np.array(self.filenames)
         filenames_id = [int(f.split('.')[0]) for f in self.filenames]
@@ -34,7 +34,7 @@ class StableBiasProfession(GenericDataset):
 
     def __getitem__(self, idx):
         filename = self.filenames[idx]
-        imagepath = os.path.join(self.path, filename)
+        imagepath = os.path.join(self.datapath, filename)
         image = Image.open(imagepath).convert("RGB")
         
         if self.transform is not None:

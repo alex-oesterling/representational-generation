@@ -28,9 +28,9 @@ class StableBiasIdentity(GenericDataset):
         # self.dataset = dataset
         GenericDataset.__init__(self, **kwargs)
         # path = '/n/holylabs/LABS/calmon_lab/Lab/datasets/stable_bias'
-        path = '/n/holyscratch01/calmon_lab/Lab/datasets/stable_bias/identities'
+        self.datapath = '/n/holyscratch01/calmon_lab/Lab/datasets/stable_bias/identities'
         # self.dataset = load_dataset('tti-bias/identities', split='train', cache_dir=path)
-        self.dataset = load_from_disk(path)
+        self.dataset = load_from_disk(self.datapath)
 
         # Original dataset contains generated samples from three diffreent models
         # self.dataset = self.dataset.filter(lambda x: x['model'] == self.args.target_model) 
@@ -63,8 +63,8 @@ class StableBiasProfession(GenericDataset):
     def __init__(self, transform=None, processor=None, **kwargs):
         GenericDataset.__init__(self, **kwargs)
         # path = '/n/holylabs/LABS/calmon_lab/Lab/datasets/stable_bias'
-        path = '/n/holyscratch01/calmon_lab/Lab/datasets/stable_bias/professions'
-        self.dataset = load_from_disk(path)
+        self.datapath = '/n/holyscratch01/calmon_lab/Lab/datasets/stable_bias/professions'
+        self.dataset = load_from_disk(self.datapath)
         # self.dataset = self.dataset.select(range(1000))
         # self.dataset = self.dataset.filter(lambda x: x['model'] == self.args.target_model) 
         model_list = self.dataset['model']

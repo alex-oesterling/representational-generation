@@ -18,7 +18,7 @@ class ModelFactory:
             network, _ = clip.load("ViT-B/32", device= 'cpu')
         elif modelname == 'SD_14':
             from diffusers import StableDiffusionPipeline
-            network = StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4")#, torch_dtype=torch.float16)
+            network = StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4", torch_dtype=torch.float16)
         elif modelname == 'SD_2':
             from diffusers import StableDiffusionPipeline, EulerDiscreteScheduler
             model_id ="stabilityai/stable-diffusion-2-1-base"

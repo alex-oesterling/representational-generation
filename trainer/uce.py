@@ -64,8 +64,6 @@ class Trainer(GenericTrainer):
         self.group_prob = torch.tensor(group_ratio / group_ratio.sum())
         self.group_prob = self.group_prob.flatten()
 
-
-
     def train(self, add=False, layers_to_edit=None, lamb=0.5, erase_scale=1, preserve_scale = 0.1, with_to_k=True, num_images=10):
         old_text_ = self.old_texts
         new_text_ = self.new_texts
@@ -170,7 +168,7 @@ class Trainer(GenericTrainer):
             weights = weights_delta
     #         weights = [weight + weights_delta[idx] for idx, weight in enumerate(weights)]
             ### START EDIT
-
+            print( ' weights ; ', weights)
             for layer_num in range(len(projection_matrices)):
                 if (layers_to_edit is not None) and (layer_num not in layers_to_edit):
                     continue
@@ -198,6 +196,9 @@ class Trainer(GenericTrainer):
                         text_embeddings = ldm_stable.text_encoder(text_input.input_ids.to(ldm_stable.device))[0]
                         old_emb = text_embeddings[0]
                         final_token_idx = text_input.attention_mask[0].sum().item()-2
+                        print(texts, text_input)
+                        # print(final_token_idx)
+                        # print(text_input.attention_mask)
                         final_token_idx_new = [text_input.attention_mask[i].sum().item()-2 for i in range(1, len(text_input.attention_mask))]
                         farthest = max(final_token_idx_new+[final_token_idx])
                         new_emb = text_embeddings[1:]

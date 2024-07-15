@@ -14,6 +14,7 @@ def main():
     parser.add_argument('--trainer', type=str, default='scratch')
     parser.add_argument('--professions', type=str, nargs='+', default=['firefighter','CEO','musician'])
     parser.add_argument('--n-generations', type=int, default=10000)
+    parser.add_argument('--n-gen-per-iter', type=int, default=10)
     parser.add_argument('--no-adjective', default=False, action='store_true')
 
     args = parser.parse_args()
@@ -38,7 +39,7 @@ def main():
     set_seed(args.seed)
 
     gen = torch.Generator(device='cuda')
-    gen.manual_seed(2)
+    gen.manual_seed(3)
 
     if args.model_path is None:
         model = networks.ModelFactory.get_model(modelname=args.model)
@@ -53,6 +54,7 @@ def main():
         file = open("adjectives.txt", "r") 
         data = file.read() 
         adjectives = data.replace('\n', ' ').split(" ") 
+        adjectives = [adj+" "  if adj != '' else adj for adj in adjectives]
         adjectives = np.array(adjectives)
         print(adjectives)
         file.close()
@@ -77,12 +79,12 @@ def main():
             if not args.no_adjective:
                 adj_idx = np.random.choice(a=adjectives.size)
                 adjective = adjectives[adj_idx]
-                images = model(prompt=f"Photo portrait of a {adjective} {profession}", num_images_per_prompt=3, gen=gen).images
+                images = model(prompt=f"Photo portrait of a {adjective}{profession}", num_images_per_prompt=args.n_gen_per_iter, generator=gen).images
                 for j, image in enumerate(images):
                     image.save(f"{path}/{img_num}.png")
                     img_num += 1
             else:
-                images = model(prompt=f"Photo portrait of a {profession}", num_images_per_prompt=5, gen=gen).images
+                images = model(prompt=f"Photo portrait of a {profession}", num_images_per_prompt=args.n_gen_per_iter, generator=gen).images
                 for j, image in enumerate(images):
                     image.save(f"{path}/{img_num}.png")
                     img_num += 1
