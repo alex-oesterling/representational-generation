@@ -63,8 +63,10 @@ class Trainer(GenericTrainer):
             group_ratio = group_ratio.swapaxes(0,1)
         self.group_prob = torch.tensor(group_ratio / group_ratio.sum())
         self.group_prob = self.group_prob.flatten()
+        
+        self.lamb = self.args.lamb
 
-    def train(self, add=False, layers_to_edit=None, lamb=0.5, erase_scale=1, preserve_scale = 0.1, with_to_k=True, num_images=10):
+    def train(self, add=False, layers_to_edit=None, erase_scale=1, preserve_scale = 0.1, with_to_k=True, num_images=10):
         old_text_ = self.old_texts
         new_text_ = self.new_texts
         retain_text_ = self.retain_texts
@@ -107,6 +109,7 @@ class Trainer(GenericTrainer):
 
         ### check the layers to edit (by default it is None; one can specify)
         layers_to_edit = ast.literal_eval(layers_to_edit) if type(layers_to_edit) == str else layers_to_edit
+        lamb = self.lamb
         lamb = ast.literal_eval(lamb) if type(lamb) == str else lamb
             
         ### Format the edits
@@ -196,13 +199,13 @@ class Trainer(GenericTrainer):
                         text_embeddings = ldm_stable.text_encoder(text_input.input_ids.to(ldm_stable.device))[0]
                         old_emb = text_embeddings[0]
                         final_token_idx = text_input.attention_mask[0].sum().item()-2
-                        print(texts, text_input)
                         # print(final_token_idx)
                         # print(text_input.attention_mask)
                         final_token_idx_new = [text_input.attention_mask[i].sum().item()-2 for i in range(1, len(text_input.attention_mask))]
                         farthest = max(final_token_idx_new+[final_token_idx])
                         new_emb = text_embeddings[1:]
 
+                        # e.g., this extracts firefighter in "a photo of firefighter"
                         context = old_emb.detach()[final_token_idx:len(old_emb)-max(0,farthest-final_token_idx)]
                         values = []
                         with torch.no_grad():
@@ -250,7 +253,7 @@ class Trainer(GenericTrainer):
                         mat1 += preserve_scale*for_mat1
                         mat2 += preserve_scale*for_mat2
                         #update projection matrix
-                        param = mat1 @ torch.inverse(mat2).type(torch.float16)
+                    param = mat1 @ torch.inverse(mat2)#.type(torch.float16)
                     projection_matrices[layer_num].weight = torch.nn.Parameter(param)
             iteration_end_time = time.time()  # Step 3
             iteration_duration = iteration_end_time - iteration_start_time  # Step 4
@@ -293,5 +296,6 @@ class Trainer(GenericTrainer):
                     probs_full.append(mask.float())
                     
             ratios.append(torch.cat(probs_full).mean(axis=0))
+            print(ratios)
     #     male = float(probs[0][0])
         return ratios

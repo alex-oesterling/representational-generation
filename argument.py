@@ -17,12 +17,17 @@ def get_args():
     parser.add_argument('--target-profession', type=str, default='all')
     parser.add_argument('--target-model', type=str, default='SD_14', #required=True, 
                         choices = ['SD_14','SD_2', 'SDXL', 'DallE'])
-    parser.add_argument('--group', type=str, nargs='+', default=['gender','age','race'])    
+    parser.add_argument('--mpr-group', type=str, nargs='+', default=['gender','age','race'])    
+    parser.add_argument('--mpr-onehot', default=False, action='store_true', help='onehot group estimation')
+    parser.add_argument('--n-compute-mpr', type=int, default=1)
+    parser.add_argument('--bootstrapping', default=False, action='store_true', help='bootstrapping')
+    parser.add_argument('--n-resampling', type=int, default=1000, help='bootstrapping')
+    parser.add_argument('--resampling-size', default=1000, help='bootstrapping')
     
     # For retrieving the dataset
     parser.add_argument('--retrieve', default=False, action='store_true', help='retrieve the dataset')
     parser.add_argument('--retriever', type=str, default='mapr', choices=['mapr', 'random','knn', 'random_ratio'])
-    parser.add_argument('--functionclass', type=str, default='linear', choices=['linear','dt','nn','l2'], help='functionclass for mapr')
+    parser.add_argument('--functionclass', type=str, default='linear', help='functionclass for mapr') # choices=['linear','dt','nn','l2'],
     parser.add_argument('--max-depth', type=int, default=2, help='max depth for decision tree')
     parser.add_argument('--ratio', type=float, default=1.0, help='ratio for random_ratio retriever')
     parser.add_argument('--pool-size', type=float, default=1.0)
@@ -42,12 +47,16 @@ def get_args():
     parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
     parser.add_argument('-wd', '--weight_decay', default=0.0, type=float, help='weight_decay')    
     parser.add_argument('--n-iters', default=50, type=int, help='total iterations')
+    parser.add_argument('--trainer-group', type=str, nargs='+', default=['gender','age','race'])    
 
     parser.add_argument('--epochs', type=int, default=10, help='number of epochs')
     parser.add_argument('--batch-size', type=int, default=256)
     parser.add_argument('--method', type=str, default=None, help='method to mitigate unfairness')
     parser.add_argument('--optimizer', type=str, default='adamw', help='optimizer')
     parser.add_argument('--lr-scheduler', type=str, default='cosine', help='scheduler')
+
+    # hyperparameters for each method
+    parser.add_argument('--lamb', type=float, default=0.5, help='regularization strength')
 
     # Info for result file names 
     parser.add_argument('--date', type=str, default='default', help='date when to save')

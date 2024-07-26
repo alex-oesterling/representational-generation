@@ -39,14 +39,15 @@ def main():
     set_seed(args.seed)
 
     gen = torch.Generator(device='cuda')
-    gen.manual_seed(3)
+    gen.manual_seed(2)
 
     if args.model_path is None:
-        model = networks.ModelFactory.get_model(modelname=args.model)
+        model = networks.ModelFactory.get_model(modelname=args.model, train=False)
     else:
         if args.trainer not in args.model_path:
             raise ValueError(f"Model name and path are not matching")
         model = torch.load(args.model_path)
+        model = model.to(torch.float16)
 
     model = model.to("cuda")
 
@@ -71,7 +72,7 @@ def main():
         print(f"Generating images for {profession}")
         path = os.path.join(base_path, profession) if not args.no_adjective else os.path.join(base_path, profession+'_noadj')
         check_log_dir(path)
-        img_num = 0
+        img_num = 21000
         while img_num < args.n_generations:
             if img_num % 1000 == 0:
                 print(f"Generated {img_num} images")

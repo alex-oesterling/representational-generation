@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 from transformers import CLIPProcessor, CLIPTokenizer #, CLIPModel
-# from diffusers import AutoencoderKL, UNet2DConditionModel, PNDMScheduler
+from diffusers import AutoencoderKL, UNet2DConditionModel, PNDMScheduler
 # from diffusers import LMSDiscreteScheduler
 # from diffusers.utils.import_utils import is_xformers_available
 
@@ -35,14 +35,14 @@ import torch.nn.functional as F
 from torch.nn import CrossEntropyLoss
 
 class Trainer(GenericTrainer):
-    concepts = ['firefighter', 'CEO']
+    concepts = ['firefighter']
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.rank = 0 # rank of the current process
         self.cur_device = get_current_device()
 
-        self.group_type = self.args.group
+        self.group_type = self.args.trainer_group
         
         self.start_iter = 0
         self._load_models()
@@ -71,7 +71,7 @@ class Trainer(GenericTrainer):
         self.args.report_memory = True
         self.args.use_amp = False
         self.args.n_image_inference = 10
-        self.args.grad_mode = True
+        self.args.grad_mode = 'last'
         self.args.pre_history = True
         self.args.reg_weight = 0.1
         self.args.num_inference_steps = 50
@@ -98,7 +98,7 @@ class Trainer(GenericTrainer):
         tokenizer, text_model, processor = self.models['tokenizer'], self.models['model'].text_model, self.models['processor']
 
         attr_train_prompt = []
-        if self.args.group == ['gender']:
+        if self.group_type == ['gender']:
             for _cls, cls_prompt in zip(self.concepts, train_prompt):
                 cls = f'an {_cls}' if _cls[0] in ['a', 'e', 'i', 'o', 'u'] else f'a {_cls}'
                 for prompt in cls_prompt:
@@ -158,6 +158,10 @@ class Trainer(GenericTrainer):
         model = CLIPModel.from_pretrained("openai/clip-vit-large-patch14")
         processor = CLIPProcessor.from_pretrained("openai/clip-vit-large-patch14")
         tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
+        
+        # vae = AutoencoderKL.from_pretrained("CompVis/stable-diffusion-v1-4", subfolder="vae")
+        # unet = UNet2DConditionModel.from_pretrained("CompVis/stable-diffusion-v1-4", subfolder="unet")
+        # scheduler = LMSDiscreteScheduler.from_pretrained("CompVis/stable-diffusion-v1-4", subfolder="scheduler")        
         vae = self.model.vae
         unet = self.model.unet
         scheduler = self.model.scheduler
@@ -311,10 +315,12 @@ class Trainer(GenericTrainer):
         for it in range(self.args.n_iters):
             loss_dict_all = {}
             for cls_idx, cls in enumerate(self.concepts):
+                print('ttt ', cls)
                 # prompt_idx = it % len(self.args.train_prompt)
-                prompt_idx = it 
+                prompt_idx = 0
                 # torch.set_grad_enabled(True)
                 self.embed_builder.train()
+
                 with torch.cuda.amp.autocast(enabled=self.args.use_amp):
                     no_update_batch_size = 9
                     loss_dict  = self.run_one(is_train=True, cls_idx=cls_idx, prompt_idx=prompt_idx, n_images=self.args.batch_size + no_update_batch_size,
@@ -338,9 +344,10 @@ class Trainer(GenericTrainer):
                         loss_dict_all[k] = [v]
 
             # Grad Accumulation and evaluation
-            if (it + 1) % self.args.grad_ac_steps == 0:
-                if self.args.clip_grad_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(self.embed_builder.parameters(), self.args.clip_grad_norm)
+            grad_ac_steps=1
+            if (it + 1) % grad_ac_steps == 0:
+                clip_grad_norm = 1
+                torch.nn.utils.clip_grad_norm_(self.embed_builder.parameters(), clip_grad_norm)
 
                 if self.args.use_amp:
                     self.scaler.unscale_(self.optimizer)
@@ -353,8 +360,8 @@ class Trainer(GenericTrainer):
                 if self.args.report_memory:
                     print("After updating learnable parameters, max mem: {:.1f} GB ".format(gpu_mem_usage()))
 
-                if self.rank == 0:
-                    self.save_embedding(it, best=False)
+                # if self.rank == 0:
+                    # self.save_embedding(it, best=False)
 
                 diff_train = torch.Tensor([self.meters['train'][cls_idx]['weighted'].get_mse(self.target_ratio)
                                                   for cls_idx, cls in enumerate(self.concepts)]).mean()
@@ -376,8 +383,8 @@ class Trainer(GenericTrainer):
                         self.embed_builder.eval()
                         with torch.no_grad():
                             with torch.cuda.amp.autocast(enabled=self.args.use_amp):
-                                self.run_one(is_train=False, cls_idx=cls_idx, prompt_idx=0, n_images=self.args.n_image_inference // self.args.world_size + int(
-                                    self.args.n_image_inference % self.args.world_size > self.rank),
+                                self.run_one(is_train=False, cls_idx=cls_idx, prompt_idx=0, n_images=self.args.n_image_inference // 1 + int(
+                                    self.args.n_image_inference % 1 > self.rank),
                                              num_inference_steps=self.args.num_inference_steps, it=it,
                                              stage=f'{stage}-eval-{cls}', world_size=1)
                         diff = self.meters['test'][cls_idx]['weighted'].get_mse(self.target_ratio)
@@ -432,7 +439,7 @@ class Trainer(GenericTrainer):
                         if best_diff >= diff_avg:
                             best_diff = diff_avg
                             best = True
-                        self.save_embedding(it, best=best)
+                    #    self.save_embedding(it, best=best)
 
                     if self.args.report_memory:
                         print("After evaluation, max mem: {:.1f} GB ".format(gpu_mem_usage()))
@@ -440,13 +447,15 @@ class Trainer(GenericTrainer):
                     if self.optimizer.param_groups[0]['lr'] < 1e-8:
                         break
 
-                if (it + 1) % (self.args.grad_ac_steps * 2) == 0 and self.args.compare_unbiased:
-                    for cls_idx, cls in enumerate(self.concepts):
-                        # torch.set_grad_enabled(False)
-                        self.embed_builder.eval()
-                        self.run_one_with_undebiased(cls_idx=cls_idx, prompt_idx=0, n_images=10,
-                                                     num_inference_steps=self.args.num_inference_steps, it=it,
-                                                     stage=f'{stage}-eval-{cls}', world_size=1)    
+        return self.model
+
+                # if (it + 1) % (self.args.grad_ac_steps * 2) == 0 and self.args.compare_unbiased:
+                #     for cls_idx, cls in enumerate(self.concepts):
+                #         # torch.set_grad_enabled(False)
+                #         self.embed_builder.eval()
+                #         self.run_one_with_undebiased(cls_idx=cls_idx, prompt_idx=0, n_images=10,
+                #                                      num_inference_steps=self.args.num_inference_steps, it=it,
+                #                                      stage=f'{stage}-eval-{cls}', world_size=1)    
 
     def run_one(self, is_train, cls_idx, prompt_idx, n_images, num_inference_steps, it, stage, world_size=1):
         model, vae, unet, scheduler, processor, tokenizer = \
@@ -462,6 +471,7 @@ class Trainer(GenericTrainer):
 
         # prt_idx = cls_idx * len(self.args.train_prompt) + prompt_idx
         prt_idx = cls_idx + prompt_idx
+        print(prt_idx, is_train)
         ##### DEBIAS #####
         text_embeddings = self.embed_builder(prt_idx, 1,
                                              text_embeddings=self.test_text_embeddings[prt_idx:prt_idx+1] if not (is_train or 'stage1' in stage) else None,
@@ -593,7 +603,7 @@ class Trainer(GenericTrainer):
         if is_train:
             if self.rank == 0:
                 val = ' '.join(['{:.3f}'.format(v) for v in sampling_prob])
-                print("Iter {} sampling prob for attr with {}: {}".format(it, self.args.cls[cls_idx], val))
+                print("Iter {} sampling prob for attr with {}: {}".format(it, self.concepts[cls_idx], val))
 
             loss, probs, targets = self.criterion(logits_all_image, sampling_prob=sampling_prob, update_batch=n_images_update,
                                                   rank=self.rank, world_size=1)

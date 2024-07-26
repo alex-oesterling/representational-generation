@@ -25,7 +25,7 @@ def eval(args):
     profession_set = query_loader.dataset.profession_set
 
     ## Compute MPR
-    vision_encoder = networks.ModelFactory.get_model(modelname=args.vision_encoder, train=args.train)  
+    vision_encoder = networks.ModelFactory.get_model(modelname=args.vision_encoder)  
     vision_encoder = vision_encoder.cuda() if torch.cuda.is_available() else vision_encoder
     
     ## Make embedding vectors
@@ -39,7 +39,19 @@ def eval(args):
     query_g_embedding = group_estimation(query_embedding, args.vision_encoder, args.mpr_group, args.mpr_onehot)
     print('Complete estimating group labels')
     
-    if args.retrieve:
+    base_filename = f'group_labels/{args.target_model}_{args.target_profession}_{args.functionclass}'
+    base_filename += '_onehot' if args.mpr_onehot else ''
+    # with open(f'group_labels/{args.target_profession}_refer_group_labels.pkl', 'wb') as f:
+        # pickle.dump(refer_g_embedding,f)
+    # with open(f'group_labels/{args.target_profession}_refer_group_labels_true.pkl', 'wb') as f:
+        # pickle.dump(refer_loader.dataset.labels.numpy(),f)
+    with open(base_filename+'_group_labels.pkl', 'wb') as f:
+        pickle.dump(query_g_embedding,f)
+    s = compute_similarity(query_embedding, profession_labels, profession_set, vision_encoder, args.vision_encoder)        
+    with open(base_filename+'_scores.pkl', 'wb') as f:
+        pickle.dump(s,f)
+    
+    if args.retrieve: 
         _retriever = retriever.RetrieverFactory.get_retriever(args.retriever, args)
     
     MPR_dic = {}
@@ -47,24 +59,16 @@ def eval(args):
     score_dic = {}
     idx_dic = {}
 
-    n_compute_mpr = args.n_compute_mpr if args.pool_size != 21000 or args.pool_size!=1.0  else 1
+    # n_compute_mpr = args.n_compute_mpr if args.pool_size != 21000.0 or args.pool_size!=1.0  else 1
+    n_compute_mpr = 1
     for _ in range(n_compute_mpr):
-        if args.bootstrapping and n_compute_mpr > 1:
-            raise ValueError('Bootstrapping is not allowed when n_compute_mpr > 1')
-        
         if args.pool_size != 1.0:
             total = query_embedding.shape[0]
             if args.pool_size < 1:
                 n_samples = int(query_embedding.shape[0]*args.pool_size)
             else:
                 n_samples = int(args.pool_size)
-            # if n_samples == 10000:
-            #     idx = np.random.choice(total, 5000, replace=False)    
-            #     idx = np.concatenate([idx,idx])
-            # elif n_samples == 20000:
-            #     idx = np.random.choice(total, 5000, replace=False)    
-            #     idx = np.concatenate([idx,idx,idx,idx])
-            # else:
+
             idx = np.random.choice(total, n_samples, replace=False)
             # print(idx[:20])
             print('Pool size is reduced to ', args.pool_size)
@@ -78,6 +82,10 @@ def eval(args):
             query_g_embedding_split = query_g_embedding
             profession_labels_split = profession_labels
 
+    #     # compute CLIP similarity
+    #     s = compute_similarity(query_embedding_split, profession_labels_split, profession_set, vision_encoder, args.vision_encoder)        
+        
+    # compute MPR
         for i, profession in enumerate(profession_set):
             if profession not in ['firefighter', 'CEO']:
                 continue
@@ -87,49 +95,39 @@ def eval(args):
                 score_dic[profession] = []
                 idx_dic[profession] = []
 
-            if args.bootstrapping:
-                for j in range(args.n_resampling):
-                    n_samples = query_embedding_split.shape[0]
-                    idx = np.random.choice(n_samples, n_samples, replace=True)
-                    query_embedding_split = query_embedding_split[idx]
-                    query_g_embedding_split = query_g_embedding_split[idx]
-                    profession_labels_split = profession_labels_split[idx]
+            profession_idx = profession_labels_split == i
+            if args.retrieve:
+                idx, MPR_list, noretrieve_MPR_list, score_list = _retriever.retrieve(query_g_embedding_split[profession_idx], refer_g_embedding, k=args.k, s=s[profession_idx])
+                # score = np.sum(s[profession_idx][idx.astype(dtype=bool)])
+                idx_dic[profession].append(idx)
+                MPR_dic[profession].append(MPR_list)
+                score_dic[profession].append(score_list)
+                norMPR_dic[profession].append(noretrieve_MPR_list)
+                print(f'Profession: {profession}, MPR: {noretrieve_MPR_list[-1]}, score: {score_list[-1]}')
+                
+            else:
+                idx = None                
+                score = np.sum(s[profession_idx])
+                MPR, reg = getMPR(query_g_embedding_split[profession_idx], curation_set=refer_g_embedding, indices=idx, modelname=args.functionclass)
+                MPR_dic[profession].append(MPR)
+                score_dic[profession].append(score)
+                print(f'Profession: {profession}, final MPR: {MPR}, score: {score}')
+                with open(base_filename+'_weight.pkl', 'wb') as f:
+                    pickle.dump(reg,f)
 
-                    # compute CLIP similarity
-                    s = compute_similarity(query_embedding_split, profession_labels_split, profession_set, vision_encoder, args.vision_encoder)        
-        
-                    # compute MPR
-            
-                    profession_idx = profession_labels_split == i
-                    if args.retrieve:
-                        idx, MPR_list, noretrieve_MPR_list, score_list = _retriever.retrieve(query_g_embedding_split[profession_idx], refer_g_embedding, k=args.k, s=s[profession_idx])
-                        # score = np.sum(s[profession_idx][idx.astype(dtype=bool)])
-                        idx_dic[profession].append(idx)
-                        MPR_dic[profession].append(MPR_list)
-                        score_dic[profession].append(score_list)
-                        norMPR_dic[profession].append(noretrieve_MPR_list)
-                        print(f'Profession: {profession}, MPR: {noretrieve_MPR_list[-1]}, score: {score_list[-1]}')
-                        
-                    else:
-                        idx = None                
-                        score = np.sum(s[profession_idx])
-                        MPR, c = getMPR(query_g_embedding_split[profession_idx], curation_set=refer_g_embedding, indices=idx, modelname=args.functionclass)
-                        MPR_dic[profession].append(MPR)
-                        score_dic[profession].append(score)
-                        print(f'Profession: {profession}, final MPR: {MPR}, score: {score}')
 
-    log_path =  make_result_path(args)
-    filename = args.time + '_' + wandb.run.id
-    with open(os.path.join(log_path,filename+'_MPR.pkl'), 'wb') as f:
-        pickle.dump(MPR_dic, f)
-    with open(os.path.join(log_path,filename+'_score.pkl'), 'wb') as f:
-        pickle.dump(score_dic, f)
+    # log_path =  make_result_path(args)
+    # filename = args.time + '_' + wandb.run.id
+    # with open(os.path.join(log_path,filename+'_MPR.pkl'), 'wb') as f:
+    #     pickle.dump(MPR_dic, f)
+    # with open(os.path.join(log_path,filename+'_score.pkl'), 'wb') as f:
+    #     pickle.dump(score_dic, f)
     
-    if args.retrieve:
-        with open(os.path.join(log_path,filename+'_norMPR.pkl'), 'wb') as f:
-            pickle.dump(norMPR_dic, f)
-        with open(os.path.join(log_path,filename+'_idx.pkl'), 'wb') as f:
-            pickle.dump(idx_dic, f)
+    # if args.retrieve:
+    #     with open(os.path.join(log_path,filename+'_norMPR.pkl'), 'wb') as f:
+    #         pickle.dump(norMPR_dic, f)
+    #     with open(os.path.join(log_path,filename+'_idx.pkl'), 'wb') as f:
+    #         pickle.dump(idx_dic, f)
 
     ## Compute FID
 
@@ -139,7 +137,7 @@ def eval(args):
 def train(args):
     # train_loader, test_loader = data_handler.DataloaderFactory.get_dataloader(dataname=args.refer_dataset, args=args)
 
-    dm = networks.ModelFactory.get_model(modelname=args.target_model, train=args.train)
+    dm = networks.ModelFactory.get_model(modelname=args.target_model)
 
     _trainer = trainer.TrainerFactory.get_trainer(trainername=args.trainer, model=dm, args=args)
     _trainer.train()
@@ -153,7 +151,9 @@ def train(args):
     groupname = "".join(groupname)
     filename = f'{args.date}_{groupname}'
     torch.save(model, os.path.join(save_dir, f'{filename}.pt'))
+
     
+
     # Get the required model
 
     # Train the model
@@ -191,19 +191,19 @@ if __name__ == '__main__':
         args.date = now.strftime('%m%d%y')
     args.time = formatted_time
 
-    run = wandb.init(
-            project='mpr_generative',
-            entity='sangwonjung-Harvard University',
-            name=args.date+'_'+formatted_time,
-            settings=wandb.Settings(start_method="fork")
-    )
-    print('wandb mode : ',run.settings.mode)
+    # run = wandb.init(
+    #         project='mpr_generative',
+    #         entity='sangwonjung-Harvard University',
+    #         name=args.date+'_'+formatted_time,
+    #         settings=wandb.Settings(start_method="fork")
+    # )
+    # print('wandb mode : ',run.settings.mode)
     
-    wandb.config.update(args)
+    # wandb.config.update(args)
 
     if args.train:
         train(args)
     else:
         eval(args)
 
-    wandb.finish()
+    # wandb.finish()

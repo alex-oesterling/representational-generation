@@ -9,7 +9,7 @@ class ModelFactory:
         pass
 
     @staticmethod
-    def get_model(modelname):
+    def get_model(modelname, train=True):
         if modelname == 'BLIP':
             from transformers import BlipForQuestionAnswering
             network = BlipForQuestionAnswering.from_pretrained("Salesforce/blip-vqa-base")
@@ -18,7 +18,10 @@ class ModelFactory:
             network, _ = clip.load("ViT-B/32", device= 'cpu')
         elif modelname == 'SD_14':
             from diffusers import StableDiffusionPipeline
-            network = StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4", torch_dtype=torch.float16)
+            if train:
+                network = StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4")#, torch_dtype=torch.float16)
+            else:
+                network = StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4", torch_dtype=torch.float16)
         elif modelname == 'SD_2':
             from diffusers import StableDiffusionPipeline, EulerDiscreteScheduler
             model_id ="stabilityai/stable-diffusion-2-1-base"

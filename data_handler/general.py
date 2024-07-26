@@ -68,9 +68,9 @@ class General(GenericDataset):
             if 'noadj' not in self.datapath:
                 raise ValueError(f"The data path should contain 'noadj' for the p_ver v2")
 
-        args_group_name = "".join([_g[0] for _g in self.args.group])        
+        args_group_name = "".join([_g[0] for _g in self.args.trainer_group])        
         if self.args.trainer != 'scratch':
             group_name = folders[2]
             if args_group_name != group_name:
-                raise ValueError(f"The group ({group_name}) in the data path and the group ({args_group_name}) are not matching")
+                raise ValueError(f"The group ({group_name}) in the data path and the trainer-group ({args_group_name}) are not matching")
         

@@ -12,7 +12,7 @@ class FairFace(GenericDataset):
     def __init__(self, transform=None, processor=None, **kwargs):
     # transform=torchvision.transforms.ToTensor(), embedding_model=None, binarize_age=True):
         GenericDataset.__init__(self, **kwargs)
-        self.datapath = os.path.join(self.root, 'tmp_fairface')
+        self.datapath = os.path.join(self.root, 'fairface')
         self.processor = processor
         self.transform = transform
 
@@ -33,7 +33,7 @@ class FairFace(GenericDataset):
         for i, race in enumerate(df.race.unique()):
             self.labeltags.append(race)
             self.race_to_idx[race] = i
-
+        print(race)
         self.gender_to_idx = {
             'Male': 0,
             'Female': 1

@@ -35,6 +35,7 @@ class SoftEmbedding(torch.nn.Module):
         soft_embedding = self.soft_embedding
         if text_embeddings is None:
             text_embeddings = self.text_embeddings[prt_idx:prt_idx+1]
+            print(self.text_embeddings.shape, prt_idx)
         if self.prompt_location == 'before':
             text_embeddings = torch.cat([soft_embedding, text_embeddings], dim=1)
         else:

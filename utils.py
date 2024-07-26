@@ -5,7 +5,7 @@ from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor
 from transformers import BlipProcessor
 import random 
-
+import itertools
 import pickle
 from tqdm import tqdm
 import clip
@@ -45,8 +45,18 @@ def get_current_device():
 
 
 def oracle_function(indices, dataset, curation_set=None, modelname='linear'):
-    if modelname == 'linear':
-        model = LinearRegression()
+    if modelname == 'linear' or 'boolean' in modelname:
+        # model = LinearRegression()
+        k = int(np.sum(indices))
+        expanded_dataset = np.concatenate((dataset, curation_set), axis=0)
+        curation_indicator = np.concatenate((np.zeros(dataset.shape[0]), np.ones(curation_set.shape[0])))
+        a_expanded = np.concatenate((indices, np.zeros(curation_set.shape[0])))
+        m = curation_set.shape[0]
+        alpha = (a_expanded/k - curation_indicator/m)
+        reg = np.dot(alpha, expanded_dataset)
+        reg = reg/np.linalg.norm(reg)
+        return reg
+
     elif 'dt' in modelname:
         if len(modelname) > 2:
             max_depth = int(modelname[2:])
@@ -77,16 +87,35 @@ def getMPR(dataset, k=0, curation_set=None, modelname=None, indices=None):
     if indices is None:
         indices = np.ones(dataset.shape[0])
     k = int(np.sum(indices))
+    # print(f'k is {k}')
+    # print(dataset.shape)
+    if 'boolean' in modelname:
+        try:
+            depth = int(modelname[7:])
+        except:
+            raise ValueError('Please specify the depth of the decision tree')
+        
+        dim = dataset.shape[1]
+        for d in range(2,depth+1):
+            for idxs in itertools.combinations(range(dim), d):
+                dataset = np.concatenate((dataset, np.prod(dataset[:,idxs], axis=1).reshape(-1,1)), axis=1)
+                curation_set = np.concatenate((curation_set, np.prod(curation_set[:,idxs], axis=1).reshape(-1,1)), axis=1)
 
     reg = oracle_function(indices, dataset, curation_set=curation_set, modelname=modelname)
     if curation_set is not None:
         expanded_dataset = np.concatenate((dataset, curation_set), axis=0)
         m = curation_set.shape[0]
-        c = reg.predict(expanded_dataset)
-        c /= np.linalg.norm(c)
+        if modelname != 'linear' and 'boolean' not in modelname:
+            c = reg.predict(expanded_dataset)
+        else:
+            c = np.dot(expanded_dataset, reg)
+            print(np.linalg.norm(expanded_dataset, axis=1))
+            print(np.sum((indices/k)*c[:dataset.shape[0]]))
+        # c /= np.linalg.norm(c)
         # c *= np.sqrt(c.shape[0]) ## sqrt(n+m) = 141   
         # print(np.sqrt(c.shape[0]), np.sqrt(m*k/(m+k)))
-        c *= np.sqrt(m*k/(m+k))
+        # c *= np.sqrt(m*k/(m+k))
+        # c *= np.sqrt(m*k/(m+k))
         mpr = np.abs(np.sum((indices/k)*c[:dataset.shape[0]]) - np.sum((1/m)*c[dataset.shape[0]:]))
     else:
         m = dataset.shape[0]
@@ -95,7 +124,7 @@ def getMPR(dataset, k=0, curation_set=None, modelname=None, indices=None):
         c *= np.sqrt(c.shape[0]) ## sqrt(n) = 100
         mpr = np.abs(np.sum((indices/k)*c) - np.sum((1/m)*c))
     
-    return mpr, c
+    return mpr, reg
 
 def feature_extraction(encoder, dataloader, args, query=True):
     encoder.eval()
@@ -147,15 +176,17 @@ def _blip_extraction(encoder, dataloader, args, query=True):
     outputs = outputs.mean(axis=1)
     return outputs if not query else (outputs, torch.cat(professions))
 
-def group_estimation(features, vision_encoder_name, group=['gender','age','race']):
+def group_estimation(features, vision_encoder_name, group=['gender','age','race'], onehot=False):
     path = '/n/holyscratch01/calmon_lab/Lab/datasets/mpr_stuffs/'
     estimated_group_list = []
     for g in group:
         with open(os.path.join(path,'clfs',f'fairface_{vision_encoder_name}_clf_{g}.pkl'), 'rb') as f:
             clf = pickle.load(f)
             estimated_group = clf.predict_proba(features)
-            # one_hot_indices = np.argmax(estimated_group, axis=1)
-            # estimated_group = np.eye(estimated_group.shape[1])[one_hot_indices]            
+            if onehot:
+                one_hot_indices = np.argmax(estimated_group, axis=1)
+                estimated_group = np.eye(estimated_group.shape[1])[one_hot_indices]
+            print(estimated_group[:10])
             estimated_group_list.append(estimated_group)
 
     # with open(os.path.join(path,'clfs',f'fairface_{vision_encoder_name}_clf_gender.pkl'), 'rb') as f:
@@ -168,8 +199,11 @@ def group_estimation(features, vision_encoder_name, group=['gender','age','race'
     # races = clf_race.predict_proba(features)
     if len(estimated_group_list) > 1:
         outputs = np.concatenate(estimated_group_list, axis=1)
+        
     else:
         outputs = np.array(estimated_group_list[0])
+    outputs = outputs*2 -1
+    # outputs = outputs / np.linalg.norm(outputs, axis=-1, keepdims=True)    
     # for i in range(outputs.shape[0]):
         # outputs[i, :] = outputs[i, :] / np.linalg.norm(outputs[i, :])
     return outputs
@@ -190,7 +224,6 @@ def compute_similarity(visual_features, profession_labels, profession_set, visio
                 text = text.cuda()
             text_embedding = vision_encoder.encode_text(text).float()
             text_embedding = text_embedding.cpu().numpy().squeeze()
-            
             text_embedding = text_embedding / np.linalg.norm(text_embedding)
             similarity[profession_idx] = visual_features[profession_idx] @ text_embedding
     return similarity
