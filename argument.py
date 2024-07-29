@@ -15,8 +15,7 @@ def get_args():
     parser.add_argument('--vision-encoder', type=str, default='CLIP', 
                         choices = ['BLIP', 'CLIP', 'PATHS'])
     parser.add_argument('--target-profession', type=str, default='all')
-    parser.add_argument('--target-model', type=str, default='SD_14', #required=True, 
-                        choices = ['SD_14','SD_2', 'SDXL', 'DallE'])
+    parser.add_argument('--target-model', type=str, default='SD_14') #required=True, 
     parser.add_argument('--mpr-group', type=str, nargs='+', default=['gender','age','race'])    
     parser.add_argument('--mpr-onehot', default=False, action='store_true', help='onehot group estimation')
     parser.add_argument('--n-compute-mpr', type=int, default=1)

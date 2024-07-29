@@ -16,7 +16,7 @@ class ModelFactory:
         elif modelname == 'CLIP':
             import clip
             network, _ = clip.load("ViT-B/32", device= 'cpu')
-        elif modelname == 'SD_14':
+        elif modelname == 'SD_14' or modelname == 'SD_15':
             from diffusers import StableDiffusionPipeline
             if train:
                 network = StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4")#, torch_dtype=torch.float16)

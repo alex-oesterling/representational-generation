@@ -39,7 +39,7 @@ def eval(args):
     query_g_embedding = group_estimation(query_embedding, args.vision_encoder, args.mpr_group, args.mpr_onehot)
     print('Complete estimating group labels')
     
-    base_filename = f'group_labels/{args.target_model}_{args.target_profession}_{args.functionclass}'
+    base_filename = f'group_labels/{args.target_model}_{args.target_profession}_{args.functionclass}' if args.trainer == 'scrach' else f'group_labels/{args.trainer}_{args.target_model}_{args.target_profession}_{args.functionclass}'
     base_filename += '_onehot' if args.mpr_onehot else ''
     # with open(f'group_labels/{args.target_profession}_refer_group_labels.pkl', 'wb') as f:
         # pickle.dump(refer_g_embedding,f)

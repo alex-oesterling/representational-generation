@@ -42,94 +42,91 @@ def eval(args):
     if args.retrieve:
         _retriever = retriever.RetrieverFactory.get_retriever(args.retriever, args)
     
-    MPR_dic = {}
-    norMPR_dic = {}
-    score_dic = {}
-    idx_dic = {}
+    MPR_dic = []
+    norMPR_dic =[]
+    score_dic = []
+    idx_dic = []
 
-    n_compute_mpr = args.n_compute_mpr if args.pool_size != 21000 or args.pool_size!=1.0  else 1
-    for _ in range(n_compute_mpr):
-        if args.bootstrapping and n_compute_mpr > 1:
-            raise ValueError('Bootstrapping is not allowed when n_compute_mpr > 1')
-        
-        if args.pool_size != 1.0:
-            total = query_embedding.shape[0]
-            if args.pool_size < 1:
-                n_samples = int(query_embedding.shape[0]*args.pool_size)
-            else:
-                n_samples = int(args.pool_size)
-            # if n_samples == 10000:
-            #     idx = np.random.choice(total, 5000, replace=False)    
-            #     idx = np.concatenate([idx,idx])
-            # elif n_samples == 20000:
-            #     idx = np.random.choice(total, 5000, replace=False)    
-            #     idx = np.concatenate([idx,idx,idx,idx])
-            # else:
-            idx = np.random.choice(total, n_samples, replace=False)
-            # print(idx[:20])
-            print('Pool size is reduced to ', args.pool_size)
+    if args.bootstrapping and args.n_resampling == 1:
+        raise ValueError('the number of resampling should be larger 1 for bootstrapping')
+    
+    if args.pool_size != 1.0:
+        total = query_embedding.shape[0]
+        if args.pool_size < 1:
+            n_samples = int(query_embedding.shape[0]*args.pool_size)
+        else:
+            n_samples = int(args.pool_size)
 
-            query_embedding_split = query_embedding[idx]
-            query_g_embedding_split = query_g_embedding[idx]
-            profession_labels_split = profession_labels[idx]
+        # idx = np.random.choice(total, n_samples, replace=False)
+        idx = np.arange(n_samples)
+        print('Pool size is reduced to ', args.pool_size)
 
+        query_embedding = query_embedding[idx]
+        query_g_embedding = query_g_embedding[idx]
+        profession_labels = profession_labels[idx]
+
+    s = compute_similarity(query_embedding, profession_labels, profession_set, vision_encoder, args.vision_encoder)        
+    if not args.bootstrapping:
+        args.n_resampling = 1
+    for j in range(args.n_resampling):
+        if args.bootstrapping:
+            n_samples = query_embedding.shape[0] // 2
+            resampling_idx = np.random.choice(n_samples, n_samples, replace=True)
+            query_embedding_split = query_embedding[resampling_idx]
+            query_g_embedding_split = query_g_embedding[resampling_idx]
+            profession_labels_split = profession_labels[resampling_idx]
+            s_split = s[resampling_idx]
         else:
             query_embedding_split = query_embedding
             query_g_embedding_split = query_g_embedding
             profession_labels_split = profession_labels
+            s_split = s
 
-        for i, profession in enumerate(profession_set):
-            if profession not in ['firefighter', 'CEO']:
-                continue
-            if profession not in MPR_dic.keys():
-                MPR_dic[profession] = []
-                norMPR_dic[profession] = []
-                score_dic[profession] = []
-                idx_dic[profession] = []
+        # compute CLIP similarity
 
-            if args.bootstrapping:
-                for j in range(args.n_resampling):
-                    n_samples = query_embedding_split.shape[0]
-                    idx = np.random.choice(n_samples, n_samples, replace=True)
-                    query_embedding_split = query_embedding_split[idx]
-                    query_g_embedding_split = query_g_embedding_split[idx]
-                    profession_labels_split = profession_labels_split[idx]
 
-                    # compute CLIP similarity
-                    s = compute_similarity(query_embedding_split, profession_labels_split, profession_set, vision_encoder, args.vision_encoder)        
-        
-                    # compute MPR
+        # compute MPR
+
+        if args.retrieve:
+            retrieved_idx, _, MPR, score = _retriever.retrieve(query_g_embedding_split, refer_g_embedding, k=args.k, s=s)
+            # score = np.sum(s[profession_idx][idx.astype(dtype=bool)])
+            idx_dic.append(idx[retrieved_idx])
+            # norMPR_dic.append(noretrieve_MPR_list)
+            print(f'Profession: {args.target_profession}, MPR: {noretrieve_MPR_list[-1]}, score: {score_list[-1]}')
             
-                    profession_idx = profession_labels_split == i
-                    if args.retrieve:
-                        idx, MPR_list, noretrieve_MPR_list, score_list = _retriever.retrieve(query_g_embedding_split[profession_idx], refer_g_embedding, k=args.k, s=s[profession_idx])
-                        # score = np.sum(s[profession_idx][idx.astype(dtype=bool)])
-                        idx_dic[profession].append(idx)
-                        MPR_dic[profession].append(MPR_list)
-                        score_dic[profession].append(score_list)
-                        norMPR_dic[profession].append(noretrieve_MPR_list)
-                        print(f'Profession: {profession}, MPR: {noretrieve_MPR_list[-1]}, score: {score_list[-1]}')
-                        
-                    else:
-                        idx = None                
-                        score = np.sum(s[profession_idx])
-                        MPR, c = getMPR(query_g_embedding_split[profession_idx], curation_set=refer_g_embedding, indices=idx, modelname=args.functionclass)
-                        MPR_dic[profession].append(MPR)
-                        score_dic[profession].append(score)
-                        print(f'Profession: {profession}, final MPR: {MPR}, score: {score}')
+        else:
+            score = np.sum(s_split)
+            MPR, c = getMPR(query_g_embedding_split, curation_set=refer_g_embedding, modelname=args.functionclass, groups=args.mpr_group)
+            print(f'Profession: {args.target_profession}, final MPR: {MPR}, score: {score}')
+        MPR_dic.append(MPR)
+        score_dic.append(score)
 
     log_path =  make_result_path(args)
     filename = args.time + '_' + wandb.run.id
-    with open(os.path.join(log_path,filename+'_MPR.pkl'), 'wb') as f:
-        pickle.dump(MPR_dic, f)
-    with open(os.path.join(log_path,filename+'_score.pkl'), 'wb') as f:
-        pickle.dump(score_dic, f)
-    
-    if args.retrieve:
-        with open(os.path.join(log_path,filename+'_norMPR.pkl'), 'wb') as f:
-            pickle.dump(norMPR_dic, f)
-        with open(os.path.join(log_path,filename+'_idx.pkl'), 'wb') as f:
-            pickle.dump(idx_dic, f)
+    results = {}
+    results['MPR'] = MPR_dic
+    results['score'] = score_dic
+    results['optimal_c'] = c
+    if args.retrieve: 
+        results['idx'] = idx_dic
+    elif args.bootstrapping:
+        results['idx'] = idx[resampling_idx]
+    else:
+        results['idx'] = idx
+
+    if args.bootstrapping:
+        mean = np.mean(MPR_dic)
+        std = np.std(MPR_dic)
+        print(f'Mean MPR: {mean}, std: {std}')
+        
+    with open(os.path.join(log_path,filename+'.pkl'), 'wb') as f:
+        pickle.dump(results, f)
+    # with open(os.path.join(log_path,filename+'_MPR.pkl'), 'wb') as f:
+    #     pickle.dump(MPR_dic, f)
+    # with open(os.path.join(log_path,filename+'_score.pkl'), 'wb') as f:
+    #     pickle.dump(score_dic, f)
+    # with open(os.path.join(log_path,filename+'_idx.pkl'), 'wb') as f:
+    #     pickle.dump(idx_dic, f)
 
     ## Compute FID
 

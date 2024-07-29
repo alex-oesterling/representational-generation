@@ -9,6 +9,11 @@ import itertools
 import pickle
 from tqdm import tqdm
 import clip
+group_dic = {
+    'gender' : ['male', 'female'],
+    'age' : ['young', 'old'],
+    'race' : ['East Asian', 'Indian', 'Black', 'White', 'Middle Eastern', 'Latino_Hispanic', 'Southeast Asian']
+}
 
 def make_result_path(args):
     # filename = f'{args.query_dataset}_{args.refer_dataset}_{args.vision_encoder}_{args.target_model}_{args.functionclass}'
@@ -44,6 +49,7 @@ def get_current_device():
     return cur_device
 
 
+
 def oracle_function(indices, dataset, curation_set=None, modelname='linear'):
     if modelname == 'linear' or 'boolean' in modelname:
         # model = LinearRegression()
@@ -57,38 +63,49 @@ def oracle_function(indices, dataset, curation_set=None, modelname='linear'):
         reg = reg/np.linalg.norm(reg)
         return reg
 
-    elif 'dt' in modelname:
-        if len(modelname) > 2:
-            max_depth = int(modelname[2:])
-        else: 
-            max_depth = 2
-        model = RandomForestRegressor(max_depth=max_depth, random_state=0)
     elif modelname == 'l2':
         return alpha
     else:
         raise ValueError('Only linear and dt are supported for now')
 
-    k = int(np.sum(indices))
-    if curation_set is not None:
-        m = curation_set.shape[0]
-        expanded_dataset = np.concatenate((dataset, curation_set), axis=0)
-        curation_indicator = np.concatenate((np.zeros(dataset.shape[0]), np.ones(curation_set.shape[0])))
-        a_expanded = np.concatenate((indices, np.zeros(curation_set.shape[0])))
-        m = curation_set.shape[0]
-        alpha = (a_expanded/k - curation_indicator/m)
-        reg = model.fit(expanded_dataset, alpha) 
-    else:
-        m = dataset.shape[0]
-        alpha = (indices/k - 1/m)
-        reg = model.fit(dataset, alpha)
-    return reg
+    # k = int(np.sum(indices))
+    # if curation_set is not None:
+    #     m = curation_set.shape[0]
+    #     expanded_dataset = np.concatenate((dataset, curation_set), axis=0)
+    #     curation_indicator = np.concatenate((np.zeros(dataset.shape[0]), np.ones(curation_set.shape[0])))
+    #     a_expanded = np.concatenate((indices, np.zeros(curation_set.shape[0])))
+    #     m = curation_set.shape[0]
+    #     alpha = (a_expanded/k - curation_indicator/m)
+    #     reg = model.fit(expanded_dataset, alpha) 
+    # else:
+    #     m = dataset.shape[0]
+    #     alpha = (indices/k - 1/m)
+    #     reg = model.fit(dataset, alpha)
+    # return reg
 
-def getMPR(dataset, k=0, curation_set=None, modelname=None, indices=None):
+def compute_intersectional_probabilities(dataset, depth):
+    # Combine dataset and curation_set
+    probs = np.zeros(2**depth)
+    # Count occurrences of each unique intersectional group
+    unique, counts = np.unique(dataset, axis=0, return_counts=True)
+    
+    # Compute probabilities
+    data_probs = counts / np.sum(counts)
+    binary_vectors = list(itertools.product([0, 1], repeat=depth))
+    for subgroup, prob in zip(unique, data_probs):
+        subgroup = (subgroup+1)/2
+        subgroup = subgroup.astype(int)
+        idx =binary_vectors.index(tuple(subgroup))
+        # idx = np.sum([2**i for i in subgroup if i == 1])
+        probs[idx] = prob
+    
+    return probs
+
+def getMPR(dataset, k=0, curation_set=None, modelname=None, indices=None, groups=['gender','age','race']):
     if indices is None:
         indices = np.ones(dataset.shape[0])
     k = int(np.sum(indices))
-    # print(f'k is {k}')
-    # print(dataset.shape)
+
     if 'boolean' in modelname:
         try:
             depth = int(modelname[7:])
@@ -101,29 +118,67 @@ def getMPR(dataset, k=0, curation_set=None, modelname=None, indices=None):
                 dataset = np.concatenate((dataset, np.prod(dataset[:,idxs], axis=1).reshape(-1,1)), axis=1)
                 curation_set = np.concatenate((curation_set, np.prod(curation_set[:,idxs], axis=1).reshape(-1,1)), axis=1)
 
-    reg = oracle_function(indices, dataset, curation_set=curation_set, modelname=modelname)
-    if curation_set is not None:
-        expanded_dataset = np.concatenate((dataset, curation_set), axis=0)
-        m = curation_set.shape[0]
-        if modelname != 'linear' and 'boolean' not in modelname:
-            c = reg.predict(expanded_dataset)
-        else:
-            c = np.dot(expanded_dataset, reg)
-            print(np.linalg.norm(expanded_dataset, axis=1))
-            print(np.sum((indices/k)*c[:dataset.shape[0]]))
-        # c /= np.linalg.norm(c)
-        # c *= np.sqrt(c.shape[0]) ## sqrt(n+m) = 141   
-        # print(np.sqrt(c.shape[0]), np.sqrt(m*k/(m+k)))
-        # c *= np.sqrt(m*k/(m+k))
-        # c *= np.sqrt(m*k/(m+k))
-        mpr = np.abs(np.sum((indices/k)*c[:dataset.shape[0]]) - np.sum((1/m)*c[dataset.shape[0]:]))
+    if 'dt' not in modelname:
+        reg = oracle_function(indices, dataset, curation_set=curation_set, modelname=modelname)
+        
+        if curation_set is not None:
+            expanded_dataset = np.concatenate((dataset, curation_set), axis=0)
+            m = curation_set.shape[0]
+            if modelname != 'linear' and 'boolean' not in modelname:
+                c = reg.predict(expanded_dataset)
+            else:
+                c = np.dot(expanded_dataset, reg)
+            # c /= np.linalg.norm(c)
+            # c *= np.sqrt(c.shape[0]) ## sqrt(n+m) = 141   
+            # c *= np.sqrt(m*k/(m+k))
+            mpr = np.abs(np.sum((indices/k)*c[:dataset.shape[0]]) - np.sum((1/m)*c[dataset.shape[0]:]))
     else:
-        m = dataset.shape[0]
-        c = reg.predict(dataset)
-        c /= np.linalg.norm(c)
-        c *= np.sqrt(c.shape[0]) ## sqrt(n) = 100
-        mpr = np.abs(np.sum((indices/k)*c) - np.sum((1/m)*c))
-    
+        group_list = []
+        for group in groups:
+            group_list.extend(group_dic[group])
+        group_list = np.array(group_list)
+        try:
+            depth = int(modelname[2:])
+            print('depth:', depth)
+        except:
+            raise ValueError('Please specify the depth of the decision tree')
+        dim = dataset.shape[1]
+        if depth > dim:
+            raise ValueError('The depth of the decision tree should be smaller than the dimension of the dataset')
+        
+        max_mpr = 0
+        max_idxs = None
+        subgroup_info = {
+            'pos' : [],
+            'neg' : []
+        }
+        for idxs in itertools.combinations(range(dim), depth):
+            idxs = list(idxs)
+            idxs.sort()
+            idxs = np.array(idxs)
+            # should we condition cases where male and female are selected at the same time?
+            # dataset = np.concatenate((dataset, np.prod(dataset[:,idxs], axis=1).reshape(-1,1)), axis=1)
+            p = compute_intersectional_probabilities(dataset[:,idxs], depth)
+            q = compute_intersectional_probabilities(curation_set[:,idxs], depth)
+            mpr = 0.5 * np.sum(np.abs(p - q))
+            if max_mpr < mpr:
+                max_mpr = mpr
+                max_idxs = idxs
+                binary_vectors = list(itertools.product([0, 1], repeat=depth))
+                subgroup_info['pos'] = []
+                subgroup_info['neg'] = []
+                print(idxs, p, q)
+                for i, (prob_p, prob_q) in enumerate(zip(p, q)):
+                    subgroup_name = [group_list[idxs][k] if j == 1 else 'non ' + group_list[idxs][k] for k, j in enumerate(binary_vectors[i])]
+                    if prob_p > prob_q or prob_p == prob_q:
+                        subgroup_info['pos'].append(subgroup_name)
+                    elif prob_q > prob_p:
+                        subgroup_info['neg'].append(subgroup_name)
+                print(subgroup_info)
+        mpr = max_mpr
+
+        reg = {'subgroup_info' : subgroup_info, 'max_mpr' : max_mpr, 'max_idxs' : max_idxs}
+            
     return mpr, reg
 
 def feature_extraction(encoder, dataloader, args, query=True):
@@ -183,10 +238,14 @@ def group_estimation(features, vision_encoder_name, group=['gender','age','race'
         with open(os.path.join(path,'clfs',f'fairface_{vision_encoder_name}_clf_{g}.pkl'), 'rb') as f:
             clf = pickle.load(f)
             estimated_group = clf.predict_proba(features)
+            # if estimated_group.shape[-1] == 2:
+                # estimated_group = estimated_group[:,:1]
             if onehot:
+                # if estimated_group.shape[-1] == 1:
+                    # estimated_group = estimated_group>0.5
+                # else:
                 one_hot_indices = np.argmax(estimated_group, axis=1)
                 estimated_group = np.eye(estimated_group.shape[1])[one_hot_indices]
-            print(estimated_group[:10])
             estimated_group_list.append(estimated_group)
 
     # with open(os.path.join(path,'clfs',f'fairface_{vision_encoder_name}_clf_gender.pkl'), 'rb') as f:

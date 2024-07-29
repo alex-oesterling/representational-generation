@@ -27,7 +27,7 @@ def main():
     group_dic = {
         'gender' : ['male', 'female'],
         'age' : ['young', 'old'],
-        'race' : ['East Asian', 'White', 'Latino_Hispanic', 'Southeast Asian', 'Black', 'Indian', 'Middle Eastern']
+        'race' : ['East Asian', 'Indian', 'Black', 'White', 'Middle Eastern', 'Latino_Hispanic', 'Southeast Asian']
     }
     
     # for group in args.group:

@@ -32,7 +32,7 @@ def main():
     group_dic = {
         'gender' : ['male', 'female'],
         'age' : ['young', 'old'],
-        'race' : ['East Asian', 'White', 'Latino_Hispanic', 'Southeast Asian', 'Black', 'Indian', 'Middle Eastern']
+        'race' : ['East Asian', 'Indian', 'Black', 'White', 'Middle Eastern', 'Latino_Hispanic', 'Southeast Asian']
     }
     
     for group in args.group:
@@ -60,9 +60,16 @@ def main():
     # adjectives = [a for i, a in enumerate(adjectives) if i+1 in [3, 10,  16]]
 
     base_path = f'/n/holyscratch01/calmon_lab/Lab/datasets/fairdiffusion'
-    if len(args.group) < 3:
-        for group in args.group:
-            base_path+=f'_{group}'
+    if args.trainer != 'scratch':
+        # group_name = "".join([g[0].upper() for g in args.group])
+        group_name = args.model_path.split("_")[-1].split(".")[0]
+        base_path = os.path.join(base_path, group_name)
+    base_path = os.path.join(base_path, args.model)
+    check_log_dir(base_path)
+
+    # if len(args.group) < 3:
+        # for group in args.group:
+            # base_path+=f'_{group}'
     
     base_path = os.path.join(base_path, args.model)
     check_log_dir(base_path)
@@ -92,7 +99,7 @@ def main():
 
     path = os.path.join(base_path, args.profession)
     check_log_dir(path)
-    img_num = 9855
+    img_num = 0
     n_subgroup = defaultdict(int)
 
     while img_num < args.n_generations:
