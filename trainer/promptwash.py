@@ -69,11 +69,11 @@ class Trainer(GenericTrainer):
 
         self.target_ratio = torch.Tensor(self.group_prob)
         self.args.report_memory = True
-        self.args.use_amp = False
-        self.args.n_image_inference = 10
+        self.args.use_amp = True
+        self.args.n_image_inference = 100
         self.args.grad_mode = 'last'
         self.args.pre_history = True
-        self.args.reg_weight = 0.1
+        self.args.reg_weight = self.args.lamb
         self.args.num_inference_steps = 50
         if self.args.report_memory:
             print("After initialization of Tranier, max mem: {:.1f} GB ".format(gpu_mem_usage()))
@@ -240,7 +240,7 @@ class Trainer(GenericTrainer):
     
 
     def _build_criterion(self):
-        return LossV2(cls_type='ce', update_gather=False,
+        return LossV2(cls_type='ce', update_gather=True,
                         no_sampling=False, weight_no_update=10000., no_matching=False).to(self.cur_device)
 
     def _build_optimizer(self, embed_builder):
@@ -274,11 +274,11 @@ class Trainer(GenericTrainer):
             return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.args.n_iters)
         elif self.args.lr_scheduler != 'step-tt':
             return torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
+        
         return None
     
     def train(self, stage='stage2'):
         best_diff, best_diff_train = 1., 0.7
-        excute_eval = False
         initial_argmax = None
         cls_weight = [1.] * len(self.concepts)
 
@@ -302,7 +302,6 @@ class Trainer(GenericTrainer):
         diff_avg = np.array(diff_list).mean()
         if best_diff >= diff_avg:
             best_diff = diff_avg
-
         if initial_argmax is None:
             obtained_vals = [self.meters['test'][cls_idx]['weighted'].get_val() - self.target_ratio for cls_idx, _
                                 in enumerate(self.concepts)]
@@ -315,7 +314,6 @@ class Trainer(GenericTrainer):
         for it in range(self.args.n_iters):
             loss_dict_all = {}
             for cls_idx, cls in enumerate(self.concepts):
-                print('ttt ', cls)
                 # prompt_idx = it % len(self.args.train_prompt)
                 prompt_idx = 0
                 # torch.set_grad_enabled(True)
@@ -344,7 +342,7 @@ class Trainer(GenericTrainer):
                         loss_dict_all[k] = [v]
 
             # Grad Accumulation and evaluation
-            grad_ac_steps=1
+            grad_ac_steps=5
             if (it + 1) % grad_ac_steps == 0:
                 clip_grad_norm = 1
                 torch.nn.utils.clip_grad_norm_(self.embed_builder.parameters(), clip_grad_norm)
@@ -367,7 +365,6 @@ class Trainer(GenericTrainer):
                                                   for cls_idx, cls in enumerate(self.concepts)]).mean()
 
                 if diff_train < best_diff_train:
-                    excute_eval = True
                     best_diff_train = diff_train
                 if getattr(self, 'lr_scheduler', None) is not None:
                     if isinstance(self.lr_scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
@@ -376,76 +373,77 @@ class Trainer(GenericTrainer):
                     elif self.args.lr_scheduler != 'step-tt':
                         self.lr_scheduler.step()
 
-                if True or (it + 1) % 10 == 0 or excute_eval:
-                    diff_list, best, dis_list = [], False, []
-                    for cls_idx, cls in enumerate(self.concepts):
-                        # torch.set_grad_enabled(False)
-                        self.embed_builder.eval()
-                        with torch.no_grad():
-                            with torch.cuda.amp.autocast(enabled=self.args.use_amp):
-                                self.run_one(is_train=False, cls_idx=cls_idx, prompt_idx=0, n_images=self.args.n_image_inference // 1 + int(
-                                    self.args.n_image_inference % 1 > self.rank),
-                                             num_inference_steps=self.args.num_inference_steps, it=it,
-                                             stage=f'{stage}-eval-{cls}', world_size=1)
-                        diff = self.meters['test'][cls_idx]['weighted'].get_mse(self.target_ratio)
-                        discrepancy = self.meters['test'][cls_idx]['weighted'].get_discrepancy()
-                        diff_list.append(diff * cls_weight[cls_idx])
-                        dis_list.append(discrepancy * cls_weight[cls_idx])
-                        if self.rank == 0:
-                            print("mse", diff)
-
-                        # if self.args.compare_unbiased:
-                        #     self.run_one_with_undebiased(cls_idx=cls_idx, n_images=10,
-                        #                                  num_inference_steps=self.args.num_inference_steps, it=it,
-                        #                                  stage=f'{stage}-eval-{cls}', world_size=self.args.world_size)
-                    if initial_argmax is None:
-                        obtained_vals = [self.meters['test'][cls_idx]['weighted'].get_val() - self.target_ratio for cls_idx, _ in enumerate(self.concepts)]
-                        # initial_argmax = [(obtained_vals[cls_idx].argmax().item(), obtained_vals[cls_idx].argmin().item()) for cls_idx, _ in enumerate(self.concepts)]
-                        initial_argmax = [obtained_vals[cls_idx].sign() for cls_idx, _ in enumerate(self.concepts)]
-                    elif self.args.lr_scheduler == 'step-tt':
-                        obtained_vals = [self.meters['test'][cls_idx]['weighted'].get_val() - self.target_ratio for
-                                         cls_idx, _ in enumerate(self.concepts)]
-                        current_argmax = [obtained_vals[cls_idx].sign() for cls_idx, _ in enumerate(self.concepts)]
-                        # current_argmax = [
-                        #     (obtained_vals[cls_idx].argmax().item(), obtained_vals[cls_idx].argmin().item()) for
-                        #     cls_idx, _ in enumerate(self.concepts)]
-                        print(initial_argmax, current_argmax)
-                        n_same = 0
-                        for a, b in zip(initial_argmax, current_argmax):
-                            # if self.args.bias in ['race5', 'age']:
-                            #     if a[0] == b[0]:
-                            #         n_same += 1
-                            # else:
-                            #     if (a[0] == b[0] or a[1] == b[1]) and b[0] != b[1]:
-                            #         n_same += 1
-                            if (a * b).sum() > 0:
-                                n_same += 1
-                        if n_same == 0:
-                            drop_r = 0.2
-                            # drop_r = 0.1 if self.args.bias == 'gender' else 0.5
-                            self.optimizer.param_groups[0]['lr'] = self.optimizer.param_groups[0]['lr'] * drop_r
-                            print("Reduce lr")
-                            print("change", initial_argmax, current_argmax)
-                            initial_argmax = current_argmax
-
-                    for cls_idx, cls in enumerate(self.concepts):
-                        self.meters['train'][cls_idx]['weighted'].step()
-                        self.meters['train'][cls_idx]['normal'].step()
-                        self.meters['test'][cls_idx]['weighted'].step()
-                        self.meters['test'][cls_idx]['normal'].step()
-
+                # if True or (it + 1) % 10 == 0 or excute_eval:
+                diff_list, best, dis_list = [], False, []
+                for cls_idx, cls in enumerate(self.concepts):
+                    # torch.set_grad_enabled(False)
+                    self.embed_builder.eval()
+                    with torch.no_grad():
+                        with torch.cuda.amp.autocast(enabled=self.args.use_amp):
+                            self.run_one(is_train=False, cls_idx=cls_idx, prompt_idx=0, n_images=self.args.n_image_inference,
+                                            num_inference_steps=self.args.num_inference_steps, it=it,
+                                            stage=f'{stage}-eval-{cls}', world_size=1)
+                    diff = self.meters['test'][cls_idx]['weighted'].get_mse(self.target_ratio)
+                    discrepancy = self.meters['test'][cls_idx]['weighted'].get_discrepancy()
+                    diff_list.append(diff * cls_weight[cls_idx])
+                    dis_list.append(discrepancy * cls_weight[cls_idx])
                     if self.rank == 0:
-                        diff_avg = np.array(diff_list).mean()
-                        if best_diff >= diff_avg:
-                            best_diff = diff_avg
-                            best = True
-                    #    self.save_embedding(it, best=best)
+                        print("mse", diff)
 
-                    if self.args.report_memory:
-                        print("After evaluation, max mem: {:.1f} GB ".format(gpu_mem_usage()))
+                    # if self.args.compare_unbiased:
+                    #     self.run_one_with_undebiased(cls_idx=cls_idx, n_images=10,
+                    #                                  num_inference_steps=self.args.num_inference_steps, it=it,
+                    #                                  stage=f'{stage}-eval-{cls}', world_size=self.args.world_size)
+                print(self.args.lr_scheduler, initial_argmax)
+                if initial_argmax is None:
+                    obtained_vals = [self.meters['test'][cls_idx]['weighted'].get_val() - self.target_ratio for cls_idx, _ in enumerate(self.concepts)]
+                    # initial_argmax = [(obtained_vals[cls_idx].argmax().item(), obtained_vals[cls_idx].argmin().item()) for cls_idx, _ in enumerate(self.concepts)]
+                    initial_argmax = [obtained_vals[cls_idx].sign() for cls_idx, _ in enumerate(self.concepts)]
+                elif self.args.lr_scheduler == 'step-tt':
+                    print('im here')
+                    obtained_vals = [self.meters['test'][cls_idx]['weighted'].get_val() - self.target_ratio for
+                                        cls_idx, _ in enumerate(self.concepts)]
+                    current_argmax = [obtained_vals[cls_idx].sign() for cls_idx, _ in enumerate(self.concepts)]
+                    # current_argmax = [
+                    #     (obtained_vals[cls_idx].argmax().item(), obtained_vals[cls_idx].argmin().item()) for
+                    #     cls_idx, _ in enumerate(self.concepts)]
+                    print(initial_argmax, current_argmax)
+                    n_same = 0
+                    for a, b in zip(initial_argmax, current_argmax):
+                        # if self.args.bias in ['race5', 'age']:
+                        #     if a[0] == b[0]:
+                        #         n_same += 1
+                        # else:
+                        #     if (a[0] == b[0] or a[1] == b[1]) and b[0] != b[1]:
+                        #         n_same += 1
+                        if (a * b).sum() > 0:
+                            n_same += 1
+                    if n_same == 0:
+                        drop_r = 0.2
+                        # drop_r = 0.1 if self.args.bias == 'gender' else 0.5
+                        self.optimizer.param_groups[0]['lr'] = self.optimizer.param_groups[0]['lr'] * drop_r
+                        print("Reduce lr")
+                        print("change", initial_argmax, current_argmax)
+                        initial_argmax = current_argmax
 
-                    if self.optimizer.param_groups[0]['lr'] < 1e-8:
-                        break
+                for cls_idx, cls in enumerate(self.concepts):
+                    self.meters['train'][cls_idx]['weighted'].step()
+                    self.meters['train'][cls_idx]['normal'].step()
+                    self.meters['test'][cls_idx]['weighted'].step()
+                    self.meters['test'][cls_idx]['normal'].step()
+
+                if self.rank == 0:
+                    diff_avg = np.array(diff_list).mean()
+                    if best_diff >= diff_avg:
+                        best_diff = diff_avg
+                        best = True
+                #    self.save_embedding(it, best=best)
+
+                if self.args.report_memory:
+                    print("After evaluation, max mem: {:.1f} GB ".format(gpu_mem_usage()))
+
+                if self.optimizer.param_groups[0]['lr'] < 1e-8:
+                    break
 
         return self.model
 
@@ -516,6 +514,7 @@ class Trainer(GenericTrainer):
                                 noise_pred_uncond = unet(latent_model_input[:bs], t,
                                                          encoder_hidden_states=t_embeddings[:bs]).sample
                             with torch.enable_grad():
+                                print('here')
                                 noise_pred_text = unet(latent_model_input[bs:], t,
                                                        encoder_hidden_states=t_embeddings[bs:]).sample
                         else:
@@ -569,6 +568,7 @@ class Trainer(GenericTrainer):
             else:
                 probs = F.softmax(logits_all_image, dim=-1).detach()
             preds = F.one_hot(probs.argmax(dim=-1), num_classes=len(self.attr)).cpu().float().sum(0)
+            print(preds)
             meters['weighted'].update(preds)
             meters['normal'].update(preds)
 
@@ -576,12 +576,13 @@ class Trainer(GenericTrainer):
         t_sampling_prob = (meters['weighted'].avg + sampling_prob_smoothing) / (1 + len(self.attr) * sampling_prob_smoothing)
         t_sampling_prob = 1 / (t_sampling_prob + 1e-8)
         t_sampling_prob /= t_sampling_prob.sum()
-        # sampling_prob = self.embed_builder_noddp.sampling_prob if self.args.train_sampling_prob else t_sampling_prob.detach().clone().to(
+        # sampling_prob = self.embed_builder_noddp.dsampling_prob if self.args.train_sampling_prob else t_sampling_prob.detach().clone().to(
             # self.cur_device)
         sampling_prob = t_sampling_prob.detach().clone().to(self.cur_device)
+        sampling_prob.data = self.target_ratio.data
 
         # Save images with classified attributes
-        pred = torch.argmax(logits_all_image, dim=-1).detach().cpu()
+        # pred = torch.argmax(logits_all_image, dim=-1).detach().cpu()
         # if len(pred) < len(grid_images):
         #     pred = torch.cat([pred[:batch_size]] * (len(add_img_for_reg) + 1) + [pred[batch_size:]])
 

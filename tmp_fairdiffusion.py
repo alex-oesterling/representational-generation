@@ -18,7 +18,7 @@ def main():
     
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--model', type=str, default='SD_14')
-    parser.add_argument('--profession', type=str, default='firefighter')
+    parser.add_argument('--concept', type=str, default='firefighter')
     parser.add_argument('--group', type=str, nargs='+', default=['gender','age','race'])
     parser.add_argument('--n-generations', type=int, default=10000)
 
@@ -97,7 +97,7 @@ def main():
     # edit_weights=[1]*num_prompt # Weights of the individual concepts against each other
     # edit_weights=[1,1,1,1,1/3.5,1/3.5,1/3.5,1/3.5,1/3.5,1/3.5,1/3.5]
 
-    path = os.path.join(base_path, args.profession)
+    path = os.path.join(base_path, args.concept)
     check_log_dir(path)
     img_num = 0
     n_subgroup = defaultdict(int)
@@ -117,10 +117,10 @@ def main():
             pos += len(group_dic[group])
 
         #choose adjective
-        adj_idx = np.random.choice(a=adjectives.size)
-        adjective = adjectives[adj_idx]
+        # adj_idx = np.random.choice(a=adjectives.size)
+        # adjective = adjectives[adj_idx]
 
-        out = pipe(prompt=f'Portrait face of a {adjective} {args.profession}', num_images_per_prompt=5, guidance_scale=7.5,generator=gen,
+        out = pipe(prompt=f'A portrait face of a {args.concept}', num_images_per_prompt=5, guidance_scale=7.5,generator=gen,
                 editing_prompt=prompt_list, 
                 reverse_editing_direction=_reverse_editing_direction, # Direction of guidance i.e. decrease the first and increase the second concept
                 edit_warmup_steps=edit_warmup_steps, # Warmup period for each concept

@@ -11,7 +11,6 @@ import random
 
 from transformers import BlipProcessor, BlipModel, BlipForConditionalGeneration, BlipForQuestionAnswering
 
-
 class DataloaderFactory:
     def __init__(self):
         pass
@@ -68,3 +67,23 @@ class DataloaderFactory:
             return train_dataloader, test_dataloader
         
         return test_dataloader
+    
+
+# if __name__ == "__main__":
+
+#     import argparse
+
+#     parser = argparse.ArgumentParser(description='representational-generation')
+
+#     parser.add_argument('--seed', type=int, default=0)
+#     parser.add_argument('--n-workers', type=int, default=1)
+#     parser.add_argument('--dataset', type=str, default='general')
+#     parser.add_argument('--dataset-path', type=str, default=None, help='it is only used when query-dataset is general')
+
+#     parser.add_argument('--train', default=False, action='store_true', help='train the model')
+#     parser.add_argument('--batch-size', type=int, default=256)
+#     parser.add_argument('--vision-encoder', type=str, default='CLIP',choices = ['BLIP', 'CLIP', 'PATHS'])
+
+#     args = parser.parse_args()
+    
+#     loader = DataloaderFactory.get_dataloader('celeba', args)

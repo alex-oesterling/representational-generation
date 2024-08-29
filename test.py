@@ -17,6 +17,42 @@ import trainer
 import retriever
 from utils import set_seed, getMPR, feature_extraction, make_result_path, group_estimation, compute_similarity, check_log_dir
 
+from insightface.app import FaceAnalysis
+import cv2
+
+
+class FaceDetector:
+    def __init__(self):
+        self.app = FaceAnalysis(name='buffalo', providers=['CUDAExecutionProvider'])
+        self.app.prepare(ctx_id=0, det_size=(640, 640))
+    
+    def process_tensor_image(self, tensor_imgs):
+        results = []
+        flags = []
+        for tensor_img in tensor_imgs:
+            img = tensor_img.permute(1, 2, 0).numpy()
+            img = (img * 255).astype(np.uint8)
+
+            faces = self.app.get(img)
+            
+            num_faces = len(faces)
+        
+            if num_faces == 1:
+                face = faces[0]
+                box = face.bbox.astype(int)
+                face_img = img[box[1]:box[3], box[0]:box[2]]
+                
+                face_img_resized = cv2.resize(face_img, (256, 256))
+                face_tensor = torch.from_numpy(face_img_resized).permute(2, 0, 1).float() / 255.0
+                
+                results.append(face_tensor)
+                flags.append(True)
+
+            else:
+                flags.append(False)
+                print(f"Number of faces detected: {num_faces}. Image not processed.")
+        return torch.stack(results), flags
+
 
 def eval(args):
     print(args.mpr_group)
@@ -39,14 +75,17 @@ def eval(args):
     query_g_embedding = group_estimation(query_embedding, args.vision_encoder, args.mpr_group, args.mpr_onehot)
     print('Complete estimating group labels')
     
-    base_filename = f'group_labels/{args.target_model}_{args.target_profession}_{args.functionclass}' if args.trainer == 'scrach' else f'group_labels/{args.trainer}_{args.target_model}_{args.target_profession}_{args.functionclass}'
+    base_filename = f'group_labels/{args.target_model}_{args.target_profession}_{args.functionclass}' if args.trainer == 'scratch' else f'group_labels/{args.trainer}_{args.target_model}_{args.target_profession}_{args.functionclass}'
     base_filename += '_onehot' if args.mpr_onehot else ''
     # with open(f'group_labels/{args.target_profession}_refer_group_labels.pkl', 'wb') as f:
         # pickle.dump(refer_g_embedding,f)
+    # print(args.mpr_onehot)
     # with open(f'group_labels/{args.target_profession}_refer_group_labels_true.pkl', 'wb') as f:
         # pickle.dump(refer_loader.dataset.labels.numpy(),f)
     with open(base_filename+'_group_labels.pkl', 'wb') as f:
         pickle.dump(query_g_embedding,f)
+        print(base_filename+'_group_labels.pkl is saved')
+
     s = compute_similarity(query_embedding, profession_labels, profession_set, vision_encoder, args.vision_encoder)        
     with open(base_filename+'_scores.pkl', 'wb') as f:
         pickle.dump(s,f)
@@ -58,7 +97,6 @@ def eval(args):
     norMPR_dic = {}
     score_dic = {}
     idx_dic = {}
-
     # n_compute_mpr = args.n_compute_mpr if args.pool_size != 21000.0 or args.pool_size!=1.0  else 1
     n_compute_mpr = 1
     for _ in range(n_compute_mpr):

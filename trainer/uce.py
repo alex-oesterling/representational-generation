@@ -14,7 +14,7 @@ class Trainer(GenericTrainer):
     #                'laborer', 'construction worker', 'developer', 'carpenter','manager',
     #                  'lawyer', 'farmer', 'salesperson', 'physician', 'firefighter', 
     #                  'analyst', 'mechanic', 'sheriff', 'CEO', 'doctor', 'chef']
-    concepts = ['firefighter', 'CEO']
+    concepts = ["chef", "cook", "therapist", "housekeeper", "pilot", "flight attendant", "taxi driver", "nurse"]
     
     def __init__(self, **kwargs):
         super(Trainer, self).__init__(**kwargs)

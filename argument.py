@@ -14,14 +14,15 @@ def get_args():
     parser.add_argument('--p-ver', type=str, default='v1', help='version of prompts used for generating')
     parser.add_argument('--vision-encoder', type=str, default='CLIP', 
                         choices = ['BLIP', 'CLIP', 'PATHS'])
-    parser.add_argument('--target-profession', type=str, default='all')
+    parser.add_argument('--target-concept', type=str, default='all')
     parser.add_argument('--target-model', type=str, default='SD_14') #required=True, 
     parser.add_argument('--mpr-group', type=str, nargs='+', default=['gender','age','race'])    
     parser.add_argument('--mpr-onehot', default=False, action='store_true', help='onehot group estimation')
     parser.add_argument('--n-compute-mpr', type=int, default=1)
     parser.add_argument('--bootstrapping', default=False, action='store_true', help='bootstrapping')
     parser.add_argument('--n-resampling', type=int, default=1000, help='bootstrapping')
-    parser.add_argument('--resampling-size', default=1000, help='bootstrapping')
+    parser.add_argument('--resampling-size', default=1000, type=int, help='bootstrapping')
+    parser.add_argument('--normalize', default=False, action='store_true', help='normalization for x')
     
     # For retrieving the dataset
     parser.add_argument('--retrieve', default=False, action='store_true', help='retrieve the dataset')
@@ -30,6 +31,7 @@ def get_args():
     parser.add_argument('--max-depth', type=int, default=2, help='max depth for decision tree')
     parser.add_argument('--ratio', type=float, default=1.0, help='ratio for random_ratio retriever')
     parser.add_argument('--pool-size', type=float, default=1.0)
+    parser.add_argument('--refer-size', type=float, default=1.0)
     parser.add_argument('--k', type=int, default=20, help='the number of retrieved sample')
 
 
@@ -44,7 +46,7 @@ def get_args():
     parser.add_argument('--train', default=False, action='store_true', help='train the model')
     parser.add_argument('--trainer', default='scratch', type=str, help='choose the trainer')
     parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
-    parser.add_argument('-wd', '--weight_decay', default=0.0, type=float, help='weight_decay')    
+    parser.add_argument('-wd', '--weight_decay', default=0.0001, type=float, help='weight_decay')    
     parser.add_argument('--n-iters', default=50, type=int, help='total iterations')
     parser.add_argument('--trainer-group', type=str, nargs='+', default=['gender','age','race'])    
 

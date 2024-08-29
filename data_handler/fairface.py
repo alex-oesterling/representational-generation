@@ -12,7 +12,8 @@ class FairFace(GenericDataset):
     def __init__(self, transform=None, processor=None, **kwargs):
     # transform=torchvision.transforms.ToTensor(), embedding_model=None, binarize_age=True):
         GenericDataset.__init__(self, **kwargs)
-        self.datapath = os.path.join(self.root, 'fairface')
+        self.dataset_path = os.path.join(self.dataset_root, 'fairface')
+        
         self.processor = processor
         self.transform = transform
 
@@ -25,15 +26,14 @@ class FairFace(GenericDataset):
         ]
 
         if self.split=='train':
-            df = pd.read_csv(self.datapath + "/fairface_label_train.csv")
+            df = pd.read_csv(self.dataset_path + "/fairface_label_train.csv")
         else:
-            df = pd.read_csv(self.datapath + "/fairface_label_val.csv")
+            df = pd.read_csv(self.dataset_path + "/fairface_label_val.csv")
 
         self.race_to_idx = {}
         for i, race in enumerate(df.race.unique()):
             self.labeltags.append(race)
             self.race_to_idx[race] = i
-        print(race)
         self.gender_to_idx = {
             'Male': 0,
             'Female': 1
@@ -55,8 +55,8 @@ class FairFace(GenericDataset):
         gender_idx = [self.gender_to_idx[gen] for gen in df.gender]
         age_idx = [self.age_to_idx[age] for age in df.age]
 
-        if self.args.binarize_age:
-            age_idx = [int(ag>4) for ag in age_idx]
+        # if self.args.binarize_age:
+        age_idx = [int(ag>4) for ag in age_idx]
         ## labels is [gender_binary, age_categorical, race_one_hot]
 
         self.labels = []
@@ -65,10 +65,9 @@ class FairFace(GenericDataset):
 
         self.labels = torch.tensor(self.labels)
 
-        # construct_path = lambda x: os.path.join(self.datapath, x)
+        # construct_path = lambda x: os.path.join(self.dataset_path, x)
         self.img_paths = df.file.to_list()
 
-        print(self.labeltags)
 
     def __len__(self):
         return len(self.labels)
@@ -77,15 +76,15 @@ class FairFace(GenericDataset):
         # if self.embedding_model is not None:
         #     path = self.img_paths[idx]
         #     image_id = path.split(".")[0]
-        #     embeddingpath = os.path.join(self.datapath, self.embedding_model, image_id+".pt")
+        #     embeddingpath = os.path.join(self.dataset_path, self.embedding_model, image_id+".pt")
         #     return torch.load(embeddingpath), self.labels[idx]
         
-        path = os.path.join(self.datapath, self.img_paths[idx])
-        image = Image.open(path)
+        path = os.path.join(self.dataset_path, self.img_paths[idx])
+        image = Image.open(path).convert("RGB")
         if self.transform is not None:
             image = self.transform(image)
         if self.processor is not None:
             image = self.processor(images=image, return_tensors="pt")
             image = image['pixel_values'][0]
         
-        return image, self.labels[idx]
+        return image, self.labels[idx], idx
