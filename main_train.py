@@ -1,11 +1,28 @@
 
 
+import argparse
+import itertools
+import logging
+import math
+import shutil
+import json
+import pytz
+import random
+
 import torch
 import numpy as np
 import datetime
-from argument import get_args
+from argument_train import get_args
+from pathlib import Path
 import pickle
 import wandb
+
+from accelerate import Accelerator
+from accelerate.logging import get_logger
+from accelerate.utils import ProjectConfiguration, set_seed, GradScalerKwargs
+
+import transformers
+import diffusers
 
 import sys
 import os
@@ -13,15 +30,83 @@ os.environ["WANDB_MODE"]="offline"
 
 import data_handler
 import networks
-import trainer
 import retriever
-from utils import set_seed, check_log_dir
+import trainer
+from utils import check_log_dir
 
 def main(args):
-    # train_loader, test_loader = data_handler.DataloaderFactory.get_dataloader(dataname=args.refer_dataset, args=args)
+    
+    logger = get_logger(__name__)
+    logging_dir = Path(args.output_dir, args.logging_dir)
+
+    kwargs = GradScalerKwargs(
+        init_scale = 2.**0,
+        growth_interval=99999999, 
+        backoff_factor=0.5,
+        growth_factor=2,
+        )
+
+    accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
+
+    accelerator = Accelerator(
+        gradient_accumulation_steps=1, # we did not implement gradient accumulation
+        mixed_precision=args.mixed_precision, # default : fp16
+        log_with=args.report_to, 
+        project_config=accelerator_project_config,
+        kwargs_handlers=[kwargs]
+    )
+
+    # if args.report_to == "wandb":
+    #     if not is_wandb_available():
+    #         raise ImportError("Make sure to install wandb if you want to use it for logging during training.")
+    #     import wandb
+    # else:
+    #     raise ValueError("--report_to must be set to 'wanb', others are not implemented.")
+    
+    # Make one log on every process with the configuration for debugging.
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO,
+    )
+    logger.info(accelerator.state, main_process_only=False)
+    if accelerator.is_local_main_process:
+        transformers.utils.logging.set_verbosity_warning()
+        diffusers.utils.logging.set_verbosity_info()
+    else:
+        transformers.utils.logging.set_verbosity_error()
+        diffusers.utils.logging.set_verbosity_error()
+
+    # Handle the repository creation
+    if accelerator.is_main_process:
+        if args.output_dir is not None:
+            os.makedirs(args.output_dir, exist_ok=True)
+            
+    # We need to initialize the trackers we use, and also store our configuration.
+    # The trackers initializes automatically on the main process.
+    folder_name = f"{args.trainer}/{args.train_images_per_prompt_GPU*accelerator.num_processes}_wImg-{args.weight_loss_img}-{args.factor1}-{args.factor2}_wFace-{args.weight_loss_face}_Th-{args.uncertainty_threshold}_loraR-{args.rank}_lr-{args.learning_rate}"#_{timestring}"
+    
+    args.imgs_save_dir = os.path.join(args.output_dir, folder_name, "imgs")
+    args.ckpts_save_dir = os.path.join(args.output_dir, folder_name, "ckpts")
+
+    if accelerator.is_main_process:
+        os.makedirs(args.imgs_save_dir, exist_ok=True)
+        os.makedirs(args.ckpts_save_dir, exist_ok=True)
+        accelerator.init_trackers(
+            args.trainer, 
+            init_kwargs = {
+                "wandb": {
+                    "name": folder_name, 
+                    "dir": args.output_dir
+                        }
+                }
+            )
+    
+
+    set_seed(args.seed, device_specific=True)
 
     dm = networks.ModelFactory.get_model(modelname=args.target_model, train=args.train)
-
+    
     _trainer = trainer.TrainerFactory.get_trainer(trainername=args.trainer, model=dm, args=args)
     _trainer.train()
 
@@ -39,6 +124,7 @@ def main(args):
 
     # Train the model
 
+    wandb.finish()
 
 if __name__ == '__main__':
 
@@ -62,7 +148,8 @@ if __name__ == '__main__':
     np.set_printoptions(precision=4)
     torch.set_printoptions(precision=4)
 
-    set_seed(args.seed)
+    # set_seed(args.seed)
+
 
     now = datetime.datetime.now()
     # Format as 'ddmmyyHMS'

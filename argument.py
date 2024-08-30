@@ -3,7 +3,9 @@ import torch
 
 def get_args():
     parser = argparse.ArgumentParser(description='representational-generation')
-    
+
+    parser.add_argument('--train', default=False, action='store_false', help='train the model')
+
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--n-workers', type=int, default=1)
     
@@ -41,20 +43,6 @@ def get_args():
 
     # Hyperparameters used for each dataset
     parser.add_argument('--binarize-age', default=True, action='store_false', help='it is used for fairface only')                    
-
-    # Hyperparameters for training
-    parser.add_argument('--train', default=False, action='store_true', help='train the model')
-    parser.add_argument('--trainer', default='scratch', type=str, help='choose the trainer')
-    parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
-    parser.add_argument('-wd', '--weight_decay', default=0.0001, type=float, help='weight_decay')    
-    parser.add_argument('--n-iters', default=50, type=int, help='total iterations')
-    parser.add_argument('--trainer-group', type=str, nargs='+', default=['gender','age','race'])    
-
-    parser.add_argument('--epochs', type=int, default=10, help='number of epochs')
-    parser.add_argument('--batch-size', type=int, default=256)
-    parser.add_argument('--method', type=str, default=None, help='method to mitigate unfairness')
-    parser.add_argument('--optimizer', type=str, default='adamw', help='optimizer')
-    parser.add_argument('--lr-scheduler', type=str, default='cosine', help='scheduler')
 
     # hyperparameters for each method
     parser.add_argument('--lamb', type=float, default=0.5, help='regularization strength')
