@@ -10,7 +10,6 @@ from skimage import transform
 from sentence_transformers import SentenceTransformer, util
 import kornia
 import numpy as np
-import face_recognition
 
 class FaceFeatsModel(torch.nn.Module):
     def __init__(self, face_feats_path):

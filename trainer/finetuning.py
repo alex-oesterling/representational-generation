@@ -16,7 +16,9 @@
 import os, sys
 
 from trainer import GenericTrainer
-from trainer.image_utils import FaceFeatsModel, image_grid, plot_in_grid, expand_bbox, crop_face, image_pipeline, get_face_feats
+from trainer.image_utils import FaceFeatsModel, plot_in_grid, get_face_feats, get_face
+import data_handler
+import networks
 
 import itertools
 import logging
@@ -30,6 +32,9 @@ from tqdm.auto import tqdm
 import copy
 import yaml
 from pathlib import Path
+import pickle
+import wandb
+
 
 import torch
 from torch import nn
@@ -99,20 +104,94 @@ logger = get_logger(__name__)
 class Trainer(GenericTrainer):
     def __init__(self, **kwargs):
         super(Trainer, self).__init__(**kwargs)
+    
+    def _construct_curation(self, args):
+        refer_loader = data_handler.DataloaderFactory.get_dataloader(dataname=args.refer_dataset, args=args)
 
-    def train(self, self.accelerator=None):
+    def _set_group_clfs(self, groups):
+        path = '/n/holyscratch01/calmon_lab/Lab/datasets/mpr_stuffs/'
+        self.group_classifier_dic = {}
+        vision_encoder = networks.ModelFactory.get_model(modelname=self.args.vision_encoder, train=False)
+        self.group_classifier_dic['vision_encoder'] = vision_encoder
+        self.group_classifier_dic['vision_encoder'].to(self.accelerator.device, dtype=self.weight_dtype)
+        self.group_classifier_dic['vision_encoder'].requires_grad_(False)
+        self.group_classifier_dic['vision_encoder'].eval()
+
+        output_dim = 0
+        for group in groups:
+            if group in ['gender', 'age','race']:
+                with open(os.path.join(path,'clfs',f'fairface_{self.args.vision_encoder}_clf_{group}.pkl'), 'rb') as f:
+                    clf = pickle.load(f)
+                
+                in_features = clf.coef_.shape[1]
+                out_features = clf.coef_.shape[0]
+                
+                linear_clf = nn.Linear(in_features, out_features)
+                linear_clf.weight.data = torch.tensor(clf.coef_, dtype=self.weight_dtype)
+                linear_clf.bias.data = torch.tensor(clf.intercept_, dtype=self.weight_dtype)
+
+                self.group_classifier_dic[group] = linear_clf
+                self.group_classifier_dic[group].to(self.accelerator.device, dtype=self.weight_dtype)
+                self.group_classifier_dic[group].requires_grad_(False)
+                self.group_classifier_dic[group].eval()
+
+                output_dim += out_features
+
+            elif group == 'face':
+                continue
+        
+        self.output_dim = output_dim
+
+    def _get_group_predictions(self, face_chips, selector=None, fill_value=-1):
+        groups = self.args.trainer_group
+
+        if selector != None:
+            face_chips_w_faces = face_chips[selector]
+        else:
+            face_chips_w_faces = face_chips
+
+        if not hasattr(self, "group_classifier_dic"):
+            self._set_group_clfs(groups)
+
+        if face_chips_w_faces.shape[0] == 0: # if there is no face from generated images,
+            logits_group = torch.empty([0,self.output_dim], dtype=face_chips.dtype, device=face_chips.device)
+            probs_group = torch.empty([0,self.output_dim], dtype=face_chips.dtype, device=face_chips.device)
+            preds_group = torch.empty([0], dtype=torch.int64, device=face_chips.device)
+        else:
+            embeddings = self.group_classifier_dic['vision_encoder'](face_chips_w_faces)
+            logits_group = []
+            for group in groups:
+                if group == 'face':
+                    continue
+                
+                clf = self.group_classifier_dic[group]
+                logits_group.append(clf(embeddings))
+            logits_group = torch.cat(logits_group, dim=1)
+        
+        if selector != None:
+            logits_group_new = torch.ones(
+                [selector.shape[0]]+list(logits_group.shape[1:]),
+                dtype=logits_group.dtype, 
+                device=logits_group.device
+                ) * (fill_value)
+            logits_group_new[selector] = logits_group
+        return logits_group_new
+
+
+    def train(self, accelerator=None):
         model = self.model
+        self.accelerator = accelerator
         tokenizer = CLIPTokenizer.from_pretrained(
             model.name_or_path,
             subfolder="tokenizer"
             )
-        text_encoder = model.text_encoder
+        self.text_encoder = model.text_encoder
         self.vae = model.vae
         self.unet = model.unet
-        self.noise_scheduler = model.noise_scheduler
+        self.noise_scheduler = model.scheduler
         
         # We only train the additional adapter LoRA layers
-        text_encoder.requires_grad_(False)
+        self.text_encoder.requires_grad_(False)
         self.unet.requires_grad_(False)
         self.vae.requires_grad_(False)
         self.unet.enable_gradient_checkpointing()
@@ -129,30 +208,30 @@ class Trainer(GenericTrainer):
                 self.weight_dtype = torch.bfloat16
 
         # Move self.unet, self.vae and text_encoder to device and cast to self.weight_dtype
-        text_encoder.to(self.accelerator.device, dtype=self.weight_dtype)
+        self.text_encoder.to(self.accelerator.device, dtype=self.weight_dtype)
         self.unet.to(self.accelerator.device, dtype=self.weight_dtype)
         self.vae.to(self.accelerator.device, dtype=self.weight_dtype)
         
         if self.args.train_text_encoder:
-            eval_text_encoder = CLIPTextModel.from_pretrained(
+            self.eval_text_encoder = CLIPTextModel.from_pretrained(
                 model.name_or_path, 
                 subfolder="text_encoder", 
                 )
-            eval_text_encoder.requires_grad_(False)
-            eval_text_encoder.to(self.accelerator.device, dtype=self.weight_dtype)
+            self.eval_text_encoder.requires_grad_(False)
+            self.eval_text_encoder.to(self.accelerator.device, dtype=self.weight_dtype)
             
         if self.args.train_unet:        
-            eval_unet = UNet2DConditionModel.from_pretrained(
+            self.eval_unet = UNet2DConditionModel.from_pretrained(
             model.name_or_path, 
             subfolder="unet",
             )
-            eval_unet.requires_grad_(False)
-            eval_unet.to(self.accelerator.device, dtype=self.weight_dtype)
+            self.eval_unet.requires_grad_(False)
+            self.eval_unet.to(self.accelerator.device, dtype=self.weight_dtype)
 
         if self.args.train_unet:
             unet_lora_procs = {}
             for name in self.unet.attn_processors.keys():
-                cross_attention_dim = None if name.endswith("attn1.processor") else unet.config.cross_attention_dim
+                cross_attention_dim = None if name.endswith("attn1.processor") else self.unet.config.cross_attention_dim
                 if name.startswith("mid_block"):
                     hidden_size = self.unet.config.block_out_channels[-1]
                 elif name.startswith("up_blocks"):
@@ -182,7 +261,7 @@ class Trainer(GenericTrainer):
 
         if self.args.train_text_encoder:
             # ensure that dtype is float32, even if rest of the model that isn't trained is loaded in fp16
-            text_encoder_lora_params = LoraLoaderMixin._modify_text_encoder(text_encoder, dtype=torch.float32, rank=self.args.rank, patch_mlp=True)
+            text_encoder_lora_params = LoraLoaderMixin._modify_text_encoder(self.text_encoder, dtype=torch.float32, rank=self.args.rank, patch_mlp=True)
             
             for p in text_encoder_lora_params:
                 torch.distributed.broadcast(p, src=0)
@@ -190,7 +269,7 @@ class Trainer(GenericTrainer):
             text_encoder_lora_dict = {}
             text_encoder_lora_params_name_order = []
             for lora_param in text_encoder_lora_params:
-                for name, param in text_encoder.named_parameters():
+                for name, param in self.text_encoder.named_parameters():
                     if param is lora_param:
                         text_encoder_lora_dict[name] = lora_param
                         text_encoder_lora_params_name_order.append(name)
@@ -278,16 +357,15 @@ class Trainer(GenericTrainer):
         
         #######################################################
         # set up things needed for finetuning        
-        gender_classifier = mobilenet_v3_large(weights=MobileNet_V3_Large_Weights.DEFAULT, width_mult=1.0, reduced_tail=False, dilated=False)
-        gender_classifier._modules['classifier'][3] = nn.Linear(1280, 80, bias=True)
+        self.gender_classifier = mobilenet_v3_large(weights=MobileNet_V3_Large_Weights.DEFAULT, width_mult=1.0, reduced_tail=False, dilated=False)
+        self.gender_classifier._modules['classifier'][3] = nn.Linear(1280, 80, bias=True)
         
-        gender_classifier.load_state_dict(torch.load(self.args.classifier_weight_path))
-        gender_classifier.to(self.accelerator.device, dtype=self.weight_dtype)
-        gender_classifier.requires_grad_(False)
-        gender_classifier.eval()
+        self.gender_classifier.load_state_dict(torch.load(self.args.classifier_weight_path))
+        self.gender_classifier.to(self.accelerator.device, dtype=self.weight_dtype)
+        self.gender_classifier.requires_grad_(False)
+        self.gender_classifier.eval()
         
         # set up face_recognition and face_app on all devices
-        import face_recognition
         face_app = FaceAnalysis(
             name="buffalo_l",
             allowed_modules=['detection'], 
@@ -327,22 +405,22 @@ class Trainer(GenericTrainer):
         with open(self.args.opensphere_config, 'r') as f:
             opensphere_config = yaml.load(f, yaml.SafeLoader)
         opensphere_config['data'] = fill_config(opensphere_config['data'])
-        face_feats_net = build_from_cfg(
+        self.face_feats_net = build_from_cfg(
             opensphere_config['model']['backbone']['net'],
             'model.backbone',
         )
-        face_feats_net = nn.DataParallel(face_feats_net)
-        face_feats_net.load_state_dict(torch.load(self.args.opensphere_model_path))
-        face_feats_net = face_feats_net.module
-        face_feats_net.to(self.accelerator.device)
-        face_feats_net.requires_grad_(False)
-        face_feats_net.to(self.weight_dtype)
-        face_feats_net.eval()
+        self.face_feats_net = nn.DataParallel(self.face_feats_net)
+        self.face_feats_net.load_state_dict(torch.load(self.args.opensphere_model_path))
+        self.face_feats_net = self.face_feats_net.module
+        self.face_feats_net.to(self.accelerator.device)
+        self.face_feats_net.requires_grad_(False)
+        self.face_feats_net.to(self.weight_dtype)
+        self.face_feats_net.eval()
         
-        face_feats_model = FaceFeatsModel(self.args.face_feats_path)
-        face_feats_model.to(self.weight_dtype_high_precision)
-        face_feats_model.to(self.accelerator.device)
-        face_feats_model.eval()
+        self.face_feats_model = FaceFeatsModel(self.args.face_feats_path)
+        self.face_feats_model.to(self.weight_dtype_high_precision)
+        self.face_feats_model.to(self.accelerator.device)
+        self.face_feats_model.eval()
 
         lr_scheduler = get_scheduler(
             self.args.lr_scheduler,
@@ -357,41 +435,13 @@ class Trainer(GenericTrainer):
                 optimizer, lr_scheduler
             )
         
+        # set the accelerator to use the model
         if self.args.train_text_encoder:
             text_encoder_lora_model, text_encoder_lora_ema = self.accelerator.prepare(text_encoder_lora_model, text_encoder_lora_ema)
             self.accelerator.register_for_checkpointing(text_encoder_lora_ema)
         if self.args.train_unet:
             unet_lora_layers, unet_lora_ema = self.accelerator.prepare(unet_lora_layers, unet_lora_ema)
             self.accelerator.register_for_checkpointing(unet_lora_ema)
-            
-        def evaluation_step(current_step):
-            noises_val = torch.randn(
-            [len(prompts_val), self.args.val_images_per_prompt_GPU,4,64,64],
-            dtype=self.weight_dtype_high_precision
-            ).to(self.accelerator.device)
-            evaluate_process(text_encoder, self.unet, "main", prompts_val, noises_val, current_step)
-
-            # evaluate EMA as well
-            if self.args.train_text_encoder:
-                text_encoder_lora_dict_copy = copy.deepcopy(text_encoder_lora_dict)
-                load_state_dict_results = text_encoder.load_state_dict(text_encoder_lora_ema_dict, strict=False)
-            
-            if self.args.train_unet:
-                with torch.no_grad():
-                    unet_lora_layers_copy = copy.deepcopy(unet_lora_layers)
-                    for p, p_from in itertools.zip_longest(list(unet_lora_layers.parameters()), unet_lora_ema.shadow_params):
-                        p.data = p_from.data
-                
-            evaluate_process(text_encoder, self.unet, "EMA", prompts_val, noises_val, current_step)
-            
-            if self.args.train_text_encoder:
-                load_state_dict_results = text_encoder.load_state_dict(text_encoder_lora_dict_copy, strict=False)
-            
-            if self.args.train_unet:
-                with torch.no_grad():
-                    for p, p_from in itertools.zip_longest(list(unet_lora_layers.parameters()), list(unet_lora_layers_copy.parameters())):
-                        p.data = p_from.data
-        
         
         # Train!
         logger.info("***** Running training *****")
@@ -399,7 +449,7 @@ class Trainer(GenericTrainer):
         logger.info(f"  Num images per prompt = {self.args.train_images_per_prompt_GPU} (per GPU) * {self.accelerator.num_processes} (GPU)")
         logger.info(f"  Num Epochs = {self.args.num_train_epochs}")
         logger.info(f"  Total optimization steps = {self.args.max_train_steps}")
-        global_step = 0
+        self.global_step = 0
         first_epoch = 0
 
         # Potentially load in the weights and states from a previous save
@@ -413,10 +463,10 @@ class Trainer(GenericTrainer):
             else:
                 self.accelerator.print(f"Resuming from checkpoint {self.args.resume_from_checkpoint}")
                 self.accelerator.load_state(self.args.resume_from_checkpoint)
-                global_step = int(os.path.basename(self.args.resume_from_checkpoint).split("-")[1])
+                self.global_step = int(os.path.basename(self.args.resume_from_checkpoint).split("-")[1])
 
-                resume_global_step = global_step
-                first_epoch = global_step // self.args.num_update_steps_per_epoch
+                resume_global_step = self.global_step
+                first_epoch = self.global_step // self.args.num_update_steps_per_epoch
                 resume_step = resume_global_step % (self.args.num_update_steps_per_epoch)
                 
                 if self.args.train_text_encoder:
@@ -432,9 +482,9 @@ class Trainer(GenericTrainer):
                     unet_lora_ema.to(self.accelerator.device)
 
         # Only show the progress bar once on each machine.
-        progress_bar = tqdm(range(global_step, self.args.max_train_steps), disable=not self.accelerator.is_local_main_process)
+        progress_bar = tqdm(range(self.global_step, self.args.max_train_steps), disable=not self.accelerator.is_local_main_process)
         progress_bar.set_description("Steps")
-        wandb_tracker = self.accelerator.get_tracker("wandb", unwrap=True)
+        self.wandb_tracker = self.accelerator.get_tracker("wandb", unwrap=True)
 
         for epoch in range(first_epoch, self.args.num_train_epochs):
             for step, data_idx in enumerate(train_dataloader_idxs[epoch]):            
@@ -444,8 +494,8 @@ class Trainer(GenericTrainer):
                     progress_bar.update(1)
                     continue
 
-                if global_step == 0:
-                    evaluation_step(global_step)
+                if self.global_step == 0:
+                    self.evaluation_step(self.global_step)
 
                 # get prompt, should be identical across processes
                 prompt_i = train_dataset.__getitem__(data_idx)
@@ -495,20 +545,22 @@ class Trainer(GenericTrainer):
                     N = math.ceil(noises_i.shape[0] / self.args.val_GPU_batch_size)
                     for j in range(N):
                         noises_ij = noises_i[self.args.val_GPU_batch_size*j:self.args.val_GPU_batch_size*(j+1)]
-                        images_ij = generate_image_no_gradient(prompt_i, noises_ij, num_denoising_steps, which_text_encoder=text_encoder, which_unet=self.unet)
+                        images_ij = self.generate_image_no_gradient(prompt_i, noises_ij, num_denoising_steps, which_text_encoder=self.text_encoder, which_unet=self.unet)
                         images.append(images_ij)
                     images = torch.cat(images)
 
                     face_indicators, face_bboxs, face_chips, face_landmarks, aligned_face_chips = get_face(images)
-                    preds_gender, probs_gender, logits_gender = get_face_gender(face_chips, selector=face_indicators, fill_value=-1)
+                    
+                    # TO DO 
+                    preds_gender, probs_gender, logits_gender = self._get_group_predictions(face_chips, selector=face_indicators, fill_value=-1)
 
                     
                     face_feats = torch.ones([aligned_face_chips.shape[0],512], dtype=self.weight_dtype_high_precision, device=aligned_face_chips.device) * (-1)
                     if sum(face_indicators)>0:
-                        face_feats_ = get_face_feats(face_feats_net, aligned_face_chips[face_indicators])
+                        face_feats_ = get_face_feats(self.face_feats_net, aligned_face_chips[face_indicators])
                         face_feats[face_indicators] = face_feats_
 
-                    _, face_real_scores = face_feats_model.semantic_search(face_feats, selector=face_indicators, return_similarity=True)
+                    # _, face_real_scores = self.face_feats_model.semantic_search(face_feats, selector=face_indicators, return_similarity=True)
 
                     face_indicators_all, face_indicators_others = customized_all_gather(face_indicators, self.accelerator, return_tensor_other_processes=True)
                     self.accelerator.print(f"\tNum faces detected: {face_indicators_all.sum().item()}/{face_indicators_all.shape[0]}.")
@@ -517,10 +569,10 @@ class Trainer(GenericTrainer):
                     face_bboxs_all = customized_all_gather(face_bboxs, self.accelerator, return_tensor_other_processes=False)
                     preds_gender_all = customized_all_gather(preds_gender, self.accelerator, return_tensor_other_processes=False)
                     probs_gender_all = customized_all_gather(probs_gender, self.accelerator, return_tensor_other_processes=False)
-                    face_real_scores_all = customized_all_gather(face_real_scores, self.accelerator, return_tensor_other_processes=False)
+                    # face_real_scores_all = customized_all_gather(face_real_scores, self.accelerator, return_tensor_other_processes=False)
                     if self.accelerator.is_main_process:
                         if step % self.args.train_plot_every_n_iter == 0:
-                            save_to = os.path.join(self.args.imgs_save_dir, f"train-{global_step}_generated.jpg")
+                            save_to = os.path.join(self.args.imgs_save_dir, f"train-{self.global_step}_generated.jpg")
                             plot_in_grid(images_all, save_to, face_indicators=face_indicators_all, face_bboxs=face_bboxs_all, preds_gender=preds_gender_all, pred_class_probs_gender=probs_gender_all.max(dim=-1).values)
 
                             log_imgs_i["img_generated"] = [save_to]
@@ -536,7 +588,8 @@ class Trainer(GenericTrainer):
                     ################################################
                     # Step 2: generate dynamic targets 
                     # also broadcast from process idx 0, just in case targets_all computed might be different on different processes
-                    targets_all, uncertainty_all = generate_dynamic_targets(probs_gender_all, w_uncertainty=True)
+                    # TO DO : skip
+                    targets_all, uncertainty_all = self.generate_dynamic_targets(probs_gender_all, w_uncertainty=True)
                     torch.distributed.broadcast(targets_all, src=0)
                     torch.distributed.broadcast(uncertainty_all, src=0)
 
@@ -554,16 +607,16 @@ class Trainer(GenericTrainer):
                     for j in range(N):
                         noises_ij = noises_i[self.args.val_GPU_batch_size*j:self.args.val_GPU_batch_size*(j+1)]
                         if self.args.train_text_encoder and self.args.train_unet:
-                            images_ij = self.generate_image_no_gradient(prompt_i, noises_ij, num_denoising_steps, which_text_encoder=eval_text_encoder, which_unet=eval_unet)
+                            images_ij = self.generate_image_no_gradient(prompt_i, noises_ij, num_denoising_steps, which_text_encoder=self.eval_text_encoder, which_unet=self.eval_unet)
                         elif self.args.train_text_encoder and not self.args.train_unet:
-                            images_ij = self.generate_image_no_gradient(prompt_i, noises_ij, num_denoising_steps, which_text_encoder=eval_text_encoder, which_unet=self.unet)
+                            images_ij = self.generate_image_no_gradient(prompt_i, noises_ij, num_denoising_steps, which_text_encoder=self.eval_text_encoder, which_unet=self.unet)
                         elif not self.args.train_text_encoder and self.args.train_unet:
-                            images_ij = self.generate_image_no_gradient(prompt_i, noises_ij, num_denoising_steps, which_text_encoder=text_encoder, which_unet=eval_unet)
+                            images_ij = self.generate_image_no_gradient(prompt_i, noises_ij, num_denoising_steps, which_text_encoder=self.text_encoder, which_unet=self.eval_unet)
                         images_ori.append(images_ij)
                     images_ori = torch.cat(images_ori)
 
                     face_indicators_ori, face_bboxs_ori, face_chips_ori, face_landmarks_ori, aligned_face_chips_ori = get_face(images_ori)
-                    preds_gender_ori, probs_gender_ori, logits_gender_ori = get_face_gender(face_chips_ori, selector=face_indicators_ori, fill_value=-1)
+                    preds_gender_ori, probs_gender_ori, logits_gender_ori = self.get_face_group(face_chips_ori, selector=face_indicators_ori, fill_value=-1)
                     
                     images_small_ori = transforms.Resize(self.args.img_size_small)(images_ori)
                     clip_feats_ori = self.get_clip_feat(images_small_ori, normalize=True, to_high_precision=True)
@@ -575,11 +628,11 @@ class Trainer(GenericTrainer):
                     preds_gender_ori_all = customized_all_gather(preds_gender_ori, self.accelerator, return_tensor_other_processes=False)
                     probs_gender_ori_all = customized_all_gather(probs_gender_ori, self.accelerator, return_tensor_other_processes=False)
 
-                    face_feats_ori = get_face_feats(face_feats_net, aligned_face_chips_ori)
+                    face_feats_ori = get_face_feats(self.face_feats_net, aligned_face_chips_ori)
                     
                     if self.accelerator.is_main_process:
                         if step % self.args.train_plot_every_n_iter == 0:
-                            save_to = os.path.join(self.args.imgs_save_dir, f"train-{global_step}_ori.jpg")
+                            save_to = os.path.join(self.args.imgs_save_dir, f"train-{self.global_step}_ori.jpg")
                             plot_in_grid(images_ori_all, save_to, face_indicators=face_indicators_ori_all, face_bboxs=face_bboxs_ori_all, preds_gender=preds_gender_ori_all, pred_class_probs_gender=probs_gender_ori_all.max(dim=-1).values)
 
                             log_imgs_i["img_ori"] = [save_to]
@@ -605,18 +658,21 @@ class Trainer(GenericTrainer):
                     face_bboxs_ori_ij = face_bboxs_ori[idxs_ij]
                     face_feats_ori_ij = face_feats_ori[idxs_ij]
                     
-                    images_ij = generate_image_w_gradient(prompt_i, noises_ij, num_denoising_steps, which_text_encoder=text_encoder, which_unet=self.unet)
+                    images_ij = self.generate_image_w_gradient(prompt_i, noises_ij, num_denoising_steps, which_text_encoder=self.text_encoder, which_unet=self.unet)
                     face_indicators_ij, face_bboxs_ij, face_chips_ij, face_landmarks_ij, aligned_face_chips_ij = get_face(images_ij)
-                    preds_gender_ij, probs_gender_ij, logits_gender_ij = get_face_gender(face_chips_ij, selector=face_indicators_ij, fill_value=-1)
                     
-                    images_ij = apply_grad_hook_face(images_ij, face_bboxs_ij, face_bboxs_ori_ij, targets_ij, preds_gender_ori_ij, probs_gender_ori_ij, factor=self.args.factor2)
+                    # TO DO
+                    preds_gender_ij, probs_gender_ij, logits_gender_ij = self.get_face_group(face_chips_ij, selector=face_indicators_ij, fill_value=-1)
+                    
+                    images_ij = self.apply_grad_hook_face(images_ij, face_bboxs_ij, face_bboxs_ori_ij, targets_ij, preds_gender_ori_ij, probs_gender_ori_ij, factor=self.args.factor2)
                     images_small_ij = transforms.Resize(self.args.img_size_small)(images_ij)
-                    clip_feats_ij = get_clip_feat(images_small_ij, normalize=True, to_high_precision=True)
-                    DINO_feats_ij = get_dino_feat(images_small_ij, normalize=True, to_high_precision=True)
+                    clip_feats_ij = self.get_clip_feat(images_small_ij, normalize=True, to_high_precision=True)
+                    DINO_feats_ij = self.get_dino_feat(images_small_ij, normalize=True, to_high_precision=True)
 
                     loss_CLIP_ij = - (clip_feats_ij * clip_feats_ori_ij).sum(dim=-1) + 1
                     loss_DINO_ij = - (DINO_feats_ij * DINO_feats_ori_ij).sum(dim=-1) + 1
-                    
+
+                    # TO DO                     
                     loss_fair_ij = torch.ones(len(idxs_ij), dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
                     idxs_w_face_loss = ((face_indicators_ij == True) * (targets_ij != -1)).nonzero().view([-1])
                     loss_fair_ij_w_face_loss = CE_loss(logits_gender_ij[idxs_w_face_loss], targets_ij[idxs_w_face_loss])
@@ -626,18 +682,20 @@ class Trainer(GenericTrainer):
 
                     idxs_w_face_feats_from_ori = ((face_indicators_ij==True) * (targets_ij!=-1) * (targets_ij==preds_gender_ori_ij) * (probs_gender_ori_ij.max(dim=-1).values>=self.args.face_gender_confidence_level)).nonzero().view([-1]).tolist()
                     if len(idxs_w_face_feats_from_ori)>0:
-                        face_feats_1 = get_face_feats(face_feats_net, aligned_face_chips_ij[idxs_w_face_feats_from_ori])
+                        face_feats_1 = get_face_feats(self.face_feats_net, aligned_face_chips_ij[idxs_w_face_feats_from_ori])
                         face_feats_target_1 = face_feats_ori_ij[idxs_w_face_feats_from_ori]
                         loss_face_ij[idxs_w_face_feats_from_ori] = (1 - (face_feats_1*face_feats_target_1).sum(dim=-1)).to(loss_face_ij.dtype)
                     
                     idxs_w_face_feats_from_search = list(set(((face_indicators_ij==True) * (targets_ij!=-1) ).nonzero().view([-1]).tolist()) - set(idxs_w_face_feats_from_ori))
                     if len(idxs_w_face_feats_from_search)>0:
-                        face_feats_2 = get_face_feats(face_feats_net, aligned_face_chips_ij[idxs_w_face_feats_from_search])
-                        face_feats_target_2 = face_feats_model.semantic_search(face_feats_2, face_indicators_ij[idxs_w_face_feats_from_search])
+                        face_feats_2 = get_face_feats(self.face_feats_net, aligned_face_chips_ij[idxs_w_face_feats_from_search])
+                        face_feats_target_2 = self.face_feats_model.semantic_search(face_feats_2, face_indicators_ij[idxs_w_face_feats_from_search])
                         loss_face_ij[idxs_w_face_feats_from_search] = (1 - (face_feats_2*face_feats_target_2).sum(dim=-1)).to(loss_face_ij.dtype)
 
-                    dynamic_weights = gen_dynamic_weights(face_indicators_ij, targets_ij, preds_gender_ori_ij, probs_gender_ori_ij, factor=self.args.factor1)
+                    # TO DO
+                    dynamic_weights = self.gen_dynamic_weights(face_indicators_ij, targets_ij, preds_gender_ori_ij, probs_gender_ori_ij, factor=self.args.factor1)
                     loss_ij = loss_fair_ij + self.args.weight_loss_img * dynamic_weights * (loss_CLIP_ij + loss_DINO_ij) + self.args.weight_loss_face * loss_face_ij
+
                     self.accelerator.backward(loss_ij.mean())
 
                     with torch.no_grad():
@@ -682,23 +740,23 @@ class Trainer(GenericTrainer):
                 if self.accelerator.is_main_process:
                     for key, values in logs_i.items():
                         if isinstance(values, list):
-                            wandb_tracker.log({f"train_{key}": np.mean(values)}, step=global_step)
+                            self.wandb_tracker.log({f"train_{key}": np.mean(values)}, step=self.global_step)
                         else:
-                            wandb_tracker.log({f"train_{key}": values.mean().item()}, step=global_step)
+                            self.wandb_tracker.log({f"train_{key}": values.mean().item()}, step=self.global_step)
 
                     for key, values in log_imgs_i.items():
-                        wandb_tracker.log({f"train_{key}":wandb.Image(
+                        self.wandb_tracker.log({f"train_{key}":wandb.Image(
                                 data_or_path=values[0],
                                 caption=prompt_i,
                             )
                             },
-                            step=global_step
+                            step=self.global_step
                             )
 
                 if self.args.train_text_encoder:
-                    model_sanity_print(text_encoder_lora_model, "check No.1, text_encoder: after self.accelerator.backward()")
+                    self.model_sanity_print(text_encoder_lora_model, "check No.1, text_encoder: after self.accelerator.backward()")
                 if self.args.train_unet:
-                    model_sanity_print(unet_lora_layers, "check No.1, unet: after self.accelerator.backward()")
+                    self.model_sanity_print(unet_lora_layers, "check No.1, unet: after self.accelerator.backward()")
 
                 # note that up till now grads are not synced
                 # we mannually sync grads
@@ -719,9 +777,9 @@ class Trainer(GenericTrainer):
                             p.grad = p.grad / self.accelerator.num_processes / N_backward
                     
                 if self.args.train_text_encoder:
-                    model_sanity_print(text_encoder_lora_model, "check No.2, text_encoder: after gradients allreduce & average")
+                    self.model_sanity_print(text_encoder_lora_model, "check No.2, text_encoder: after gradients allreduce & average")
                 if self.args.train_unet:
-                    model_sanity_print(unet_lora_layers, "check No.2, unet: after gradients allreduce & average")
+                    self.model_sanity_print(unet_lora_layers, "check No.2, unet: after gradients allreduce & average")
 
                 if grad_is_finite:
                     optimizer.step()
@@ -737,40 +795,40 @@ class Trainer(GenericTrainer):
                         unet_lora_ema.step(  unet_lora_layers.parameters() )
 
                 progress_bar.update(1)
-                global_step += 1
+                self.global_step += 1
 
                 if self.accelerator.is_main_process:
                     with torch.no_grad():
                         if self.args.train_text_encoder:
                             param_norm = np.mean([p.norm().item() for p in text_encoder_lora_params])
                             param_ema_norm = np.mean([p.norm().item() for p in text_encoder_lora_ema.shadow_params])
-                            wandb_tracker.log({f"train_TE_lora_norm": param_norm}, step=global_step)
-                            wandb_tracker.log({f"train_TE_lora_ema_norm": param_ema_norm}, step=global_step)
+                            self.wandb_tracker.log({f"train_TE_lora_norm": param_norm}, step=self.global_step)
+                            self.wandb_tracker.log({f"train_TE_lora_ema_norm": param_ema_norm}, step=self.global_step)
                         if self.args.train_unet:
                             param_norm = np.mean([p.norm().item() for p in unet_lora_layers.parameters()])
                             param_ema_norm = np.mean([p.norm().item() for p in unet_lora_ema.shadow_params])
-                            wandb_tracker.log({f"train_unet_lora_norm": param_norm}, step=global_step)
-                            wandb_tracker.log({f"train_unet_lora_ema_norm": param_ema_norm}, step=global_step)
+                            self.wandb_tracker.log({f"train_unet_lora_norm": param_norm}, step=self.global_step)
+                            self.wandb_tracker.log({f"train_unet_lora_ema_norm": param_ema_norm}, step=self.global_step)
 
-                if global_step % self.args.evaluate_every_n_iter == 0:
-                    evaluation_step(global_step)
+                if self.global_step % self.args.evaluate_every_n_iter == 0:
+                    self.evaluation_step(self.global_step)
 
                 if self.accelerator.is_main_process:
-                    if global_step % self.args.checkpointing_steps == 0:
+                    if self.global_step % self.args.checkpointing_steps == 0:
                         # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
                         if self.args.checkpoints_total_limit is not None:
                             name = "checkpoint_tmp"
                             clean_checkpoint(self.args.ckpts_save_dir, name, self.args.checkpoints_total_limit)
 
-                        save_path = os.path.join(self.args.ckpts_save_dir, f"checkpoint_tmp-{global_step}")
+                        save_path = os.path.join(self.args.ckpts_save_dir, f"checkpoint_tmp-{self.global_step}")
                         self.accelerator.save_state(save_path)
                     
                         logger.info(f"Accelerator checkpoint saved to {save_path}")
 
-                    if global_step % self.args.checkpointing_steps_long == 0:
+                    if self.global_step % self.args.checkpointing_steps_long == 0:
                         # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
 
-                        save_path = os.path.join(self.args.ckpts_save_dir, f"checkpoint-{global_step}")
+                        save_path = os.path.join(self.args.ckpts_save_dir, f"checkpoint-{self.global_step}")
                         self.accelerator.save_state(save_path)
                     
                         logger.info(f"Accelerator checkpoint saved to {save_path}")
@@ -961,56 +1019,8 @@ class Trainer(GenericTrainer):
             embeds = torch.nn.functional.normalize(embeds, dim=-1)
         return embeds
 
-    def get_face_gender(face_chips, selector=None, fill_value=-1):
-        """for CelebA classifier
-        """
-        if selector != None:
-            face_chips_w_faces = face_chips[selector]
-        else:
-            face_chips_w_faces = face_chips
-            
-        if face_chips_w_faces.shape[0] == 0:
-            logits_gender = torch.empty([0,2], dtype=face_chips.dtype, device=face_chips.device)
-            probs_gender = torch.empty([0,2], dtype=face_chips.dtype, device=face_chips.device)
-            # pred_class_probs_gender = torch.empty([0], dtype=face_chips.dtype, device=face_chips.device)
-            preds_gender = torch.empty([0], dtype=torch.int64, device=face_chips.device)
-        else:
-            logits = gender_classifier(face_chips_w_faces)
-            logits_gender = logits.view([logits.shape[0],-1,2])[:,20,:]
-            probs_gender = torch.softmax(logits_gender, dim=-1)
-        
-            temp = probs_gender.max(dim=-1)
-            # pred_class_probs_gender = temp.values
-            preds_gender = temp.indices
-        
-        if selector != None:
-            preds_gender_new = torch.ones(
-                [selector.shape[0]]+list(preds_gender.shape[1:]), 
-                dtype=preds_gender.dtype, 
-                device=preds_gender.device
-                ) * (fill_value)
-            preds_gender_new[selector] = preds_gender
-            
-            probs_gender_new = torch.ones(
-                [selector.shape[0]]+list(probs_gender.shape[1:]),
-                dtype=probs_gender.dtype, 
-                device=probs_gender.device
-                ) * (fill_value)
-            probs_gender_new[selector] = probs_gender
-            
-            logits_gender_new = torch.ones(
-                [selector.shape[0]]+list(logits_gender.shape[1:]),
-                dtype=logits_gender.dtype, 
-                device=logits_gender.device
-                ) * (fill_value)
-            logits_gender_new[selector] = logits_gender
-            
-            return preds_gender_new, probs_gender_new, logits_gender_new
-        else:
-            return preds_gender, probs_gender, logits_gender
-        
     @torch.no_grad()
-    def generate_dynamic_targets(probs, target_ratio=0.5, w_uncertainty=False):
+    def generate_dynamic_targets(self, probs, target_ratio=0.5, w_uncertainty=False):
         """generate dynamic targets for the distributional alignment loss
 
         Args:
@@ -1054,9 +1064,27 @@ class Trainer(GenericTrainer):
             return targets_all, uncertainty_all
         else:
             return targets_all
+        
+    def evaluation_step(self, prompts_val, current_step):
+        noises_val = torch.randn(
+        [len(prompts_val), self.args.val_images_per_prompt_GPU,4,64,64],
+        dtype=self.weight_dtype_high_precision
+        ).to(self.accelerator.device)
+        self.evaluate_process(self.text_encoder, self.unet, "main", prompts_val, noises_val, current_step)
+
+        # evaluate EMA as well
+        if self.args.train_text_encoder:
+            text_encoder_lora_dict_copy = copy.deepcopy(self.text_encoder_lora_dict)
+            load_state_dict_results = self.text_encoder.load_state_dict(self.text_encoder_lora_ema_dict, strict=False)
+        
+        if self.args.train_unet:
+            with torch.no_grad():
+                unet_lora_layers_copy = copy.deepcopy(self.unet_lora_layers)
+                for p, p_from in itertools.zip_longest(list(self.unet_lora_layers.parameters()), self.unet_lora_ema.shadow_params):
+                    p.data = p_from.data
 
     @torch.no_grad()
-    def evaluate_process(which_text_encoder, which_unet, name, prompts, noises, current_global_step):
+    def evaluate_process(self, which_text_encoder, which_unet, name, prompts, noises, current_global_step):
         logs = []
         log_imgs = []
         num_denoising_steps = 25
@@ -1075,18 +1103,18 @@ class Trainer(GenericTrainer):
             for j in range(N):
                 noises_ij = noises_i[self.args.val_GPU_batch_size*j:self.args.val_GPU_batch_size*(j+1)]
                 if self.args.train_text_encoder and self.args.train_unet:
-                    images_ij = generate_image_no_gradient(prompt_i, noises_ij, num_denoising_steps, which_text_encoder=eval_text_encoder, which_unet=eval_unet)
+                    images_ij = self.generate_image_no_gradient(prompt_i, noises_ij, num_denoising_steps, which_text_encoder=self.eval_text_encoder, which_unet=self.eval_unet)
                 elif self.args.train_text_encoder and not self.args.train_unet:
-                    images_ij = generate_image_no_gradient(prompt_i, noises_ij, num_denoising_steps, which_text_encoder=eval_text_encoder, which_unet=self.unet)
+                    images_ij = self.generate_image_no_gradient(prompt_i, noises_ij, num_denoising_steps, which_text_encoder=self.eval_text_encoder, which_unet=self.unet)
                 elif not self.args.train_text_encoder and self.args.train_unet:
-                    images_ij = generate_image_no_gradient(prompt_i, noises_ij, num_denoising_steps, which_text_encoder=text_encoder, which_unet=eval_unet)
+                    images_ij = self.generate_image_no_gradient(prompt_i, noises_ij, num_denoising_steps, which_text_encoder=self.text_encoder, which_unet=self.eval_unet)
                 images_ori.append(images_ij)
             images_ori = torch.cat(images_ori)
             face_indicators_ori, face_bboxs_ori, face_chips_ori, face_landmarks_ori, aligned_face_chips_ori = get_face(images_ori)
-            preds_gender_ori, probs_gender_ori, logits_gender_ori = get_face_gender(face_chips_ori, selector=face_indicators_ori, fill_value=-1)
+            preds_gender_ori, probs_gender_ori, logits_gender_ori = self.get_face_group(face_chips_ori, selector=face_indicators_ori, fill_value=-1)
             
-            face_feats_ori = get_face_feats(face_feats_net, aligned_face_chips_ori)
-            _, face_real_scores_ori = face_feats_model.semantic_search(face_feats_ori, selector=face_indicators_ori, return_similarity=True)
+            face_feats_ori = get_face_feats(self.self.face_feats_net, aligned_face_chips_ori)
+            _, face_real_scores_ori = self.face_feats_model.semantic_search(face_feats_ori, selector=face_indicators_ori, return_similarity=True)
 
             images_ori_all = customized_all_gather(images_ori, self.accelerator, return_tensor_other_processes=False)
             face_indicators_ori_all = customized_all_gather(face_indicators_ori, self.accelerator, return_tensor_other_processes=False)
@@ -1096,7 +1124,7 @@ class Trainer(GenericTrainer):
             face_real_scores_ori_all = customized_all_gather(face_real_scores_ori, self.accelerator, return_tensor_other_processes=False)
 
             if self.accelerator.is_main_process:
-                save_to = os.path.join(self.args.imgs_save_dir, f"eval_{name}_{global_step}_{prompt_i}_ori.jpg")
+                save_to = os.path.join(self.args.imgs_save_dir, f"eval_{name}_{self.global_step}_{prompt_i}_ori.jpg")
                 plot_in_grid(
                     images_ori_all, 
                     save_to, 
@@ -1113,15 +1141,15 @@ class Trainer(GenericTrainer):
             N = math.ceil(noises_i.shape[0] / self.args.val_GPU_batch_size)
             for j in range(N):
                 noises_ij = noises_i[self.args.val_GPU_batch_size*j:self.args.val_GPU_batch_size*(j+1)]
-                images_ij = generate_image_no_gradient(prompt_i, noises_ij, num_denoising_steps, which_text_encoder=which_text_encoder, which_unet=which_unet)
+                images_ij = self.generate_image_no_gradient(prompt_i, noises_ij, num_denoising_steps, which_text_encoder=which_text_encoder, which_unet=which_unet)
                 images.append(images_ij)
             images = torch.cat(images)
             
             face_indicators, face_bboxs, face_chips, face_landmarks, aligned_face_chips = get_face(images)
-            preds_gender, probs_gender, logits_gender = get_face_gender(face_chips, selector=face_indicators, fill_value=-1)
+            preds_gender, probs_gender, logits_gender = self.get_face_group(face_chips, selector=face_indicators, fill_value=-1)
             
-            face_feats = get_face_feats(face_feats_net, aligned_face_chips)
-            _, face_real_scores = face_feats_model.semantic_search(face_feats, selector=face_indicators, return_similarity=True)
+            face_feats = get_face_feats(self.face_feats_net, aligned_face_chips)
+            _, face_real_scores = self.face_feats_model.semantic_search(face_feats, selector=face_indicators, return_similarity=True)
 
             images_all = customized_all_gather(images, self.accelerator, return_tensor_other_processes=False)
             face_indicators_all = customized_all_gather(face_indicators, self.accelerator, return_tensor_other_processes=False)
@@ -1131,7 +1159,7 @@ class Trainer(GenericTrainer):
             face_real_scores = customized_all_gather(face_real_scores, self.accelerator, return_tensor_other_processes=False)
 
             if self.accelerator.is_main_process:
-                save_to = os.path.join(self.args.imgs_save_dir, f"eval_{name}_{global_step}_{prompt_i}_generated.jpg")
+                save_to = os.path.join(self.args.imgs_save_dir, f"eval_{name}_{self.global_step}_{prompt_i}_generated.jpg")
                 plot_in_grid(
                     images_all, 
                     save_to, 
@@ -1161,13 +1189,13 @@ class Trainer(GenericTrainer):
             for prompt_i, logs_i in itertools.zip_longest(prompts, logs):
                 for key, values in logs_i.items():
                     if isinstance(values, list):
-                        wandb_tracker.log({f"eval_{name}_{key}_{prompt_i}": np.mean(values)}, step=current_global_step)
+                        self.wandb_tracker.log({f"eval_{name}_{key}_{prompt_i}": np.mean(values)}, step=current_global_step)
                     else:
-                        wandb_tracker.log({f"eval_{name}_{key}_{prompt_i}": values.mean().item()}, step=current_global_step)
+                        self.wandb_tracker.log({f"eval_{name}_{key}_{prompt_i}": values.mean().item()}, step=current_global_step)
                 
                 for key in list(logs[0].keys()):
                     avg = np.array([log[key] for log in logs]).mean()
-                    wandb_tracker.log({f"eval_{name}_{key}": avg}, step=current_global_step)
+                    self.wandb_tracker.log({f"eval_{name}_{key}": avg}, step=current_global_step)
 
             imgs_dict = {}
             for prompt_i, log_imgs_i in itertools.zip_longest(prompts, log_imgs):
@@ -1183,14 +1211,14 @@ class Trainer(GenericTrainer):
                             caption=prompt_i,
                         ))
             for key, imgs in imgs_dict.items():
-                wandb_tracker.log(
+                self.wandb_tracker.log(
                     {f"eval_{name}_{key}": imgs},
                     step=current_global_step
                     ) 
         
         return logs, log_imgs
     
-    def apply_grad_hook_face(images, face_bboxs, face_bboxs_ori, targets, preds_gender_ori, probs_gender_ori, factor=0.1):
+    def apply_grad_hook_face(self, images, face_bboxs, face_bboxs_ori, targets, preds_gender_ori, probs_gender_ori, factor=0.1):
         """apply gradient hook on non-face regions of the generated images
         """
         images_new = []
@@ -1225,7 +1253,7 @@ class Trainer(GenericTrainer):
         images_new = torch.cat(images_new)
         return images_new
     
-    def gen_dynamic_weights(face_indicators, targets, preds_gender_ori, probs_gender_ori, factor=0.2):
+    def gen_dynamic_weights(self, face_indicators, targets, preds_gender_ori, probs_gender_ori, factor=0.2):
         weights = []
         for face_indicator, target, pred_gender_ori, prob_gender_ori in itertools.zip_longest(face_indicators, targets, preds_gender_ori, probs_gender_ori):
             if (face_indicator == False).all():
@@ -1241,7 +1269,7 @@ class Trainer(GenericTrainer):
         weights = torch.tensor(weights, dtype=probs_gender_ori.dtype, device=probs_gender_ori.device)
         return weights
 
-    def model_sanity_print(model, state):
+    def model_sanity_print(self, model, state):
         params = [p for p in model.parameters()]
         print(f"\t{self.accelerator.device}; {state};\n\t\tparam[0]: {params[0].flatten()[0].item():.8f};\tparam[0].grad: {params[0].grad.flatten()[0].item():.8f}")
         
@@ -1250,14 +1278,14 @@ class Trainer(GenericTrainer):
 def make_grad_hook(coef):
     return lambda x: coef * x
 
-def customized_all_gather(tensor, self.accelerator, return_tensor_other_processes=False):
-    tensor_all = [tensor.detach().clone() for i in range(self.accelerator.num_processes)]
+def customized_all_gather(tensor, accelerator, return_tensor_other_processes=False):
+    tensor_all = [tensor.detach().clone() for i in range(accelerator.num_processes)]
     torch.distributed.all_gather(tensor_all, tensor)
     if return_tensor_other_processes:
-        if self.accelerator.num_processes>1:
-            tensor_others = torch.cat([tensor_all[idx] for idx in range(self.accelerator.num_processes) if idx != self.accelerator.local_process_index], dim=0)
+        if accelerator.num_processes>1:
+            tensor_others = torch.cat([tensor_all[idx] for idx in range(accelerator.num_processes) if idx != accelerator.local_process_index], dim=0)
         else:
-            tensor_others = torch.empty([0,]+ list(tensor_all[0].shape[1:]), device=self.accelerator.device, dtype=tensor_all[0].dtype)
+            tensor_others = torch.empty([0,]+ list(tensor_all[0].shape[1:]), device=accelerator.device, dtype=tensor_all[0].dtype)
     tensor_all = torch.cat(tensor_all, dim=0)
     
     if return_tensor_other_processes:
@@ -1282,5 +1310,5 @@ def clean_checkpoint(ckpts_save_dir, name, checkpoints_total_limit):
         logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
 
         for removing_checkpoint in removing_checkpoints:
-            removing_checkpoint = os.path.join(args.ckpts_save_dir, removing_checkpoint)
+            removing_checkpoint = os.path.join(ckpts_save_dir, removing_checkpoint)
             shutil.rmtree(removing_checkpoint)

@@ -29,7 +29,20 @@ def get_args():
     parser.add_argument('--date', type=str, default='default', help='date when to save')
     parser.add_argument('--save-dir', type=str, default='results/', help='directory to save the results')
 
-    # 1. experiment setting
+    # for finetuning
+    parser.add_argument('--vision-encoder', type=str, default='CLIP',choices = ['BLIP', 'CLIP', 'PATHS'])
+    parser.add_argument(
+        "--train_text_encoder",
+        action="store_true",
+        default=True,
+        help="Whether to train the text encoder. If set, the text encoder should be float32 precision.",
+    )
+    parser.add_argument(
+        "--train_unet",
+        action="store_true",
+        default=False,
+        help="Whether to train unet. If set, the text encoder should be float32 precision.",
+    )
     parser.add_argument(
         "--checkpointing_steps",
         type=int,
@@ -186,12 +199,12 @@ def get_args():
     parser.add_argument(
         "--prompt_occupation_path",
         type=str,
-        default="data/1-prompts/occupation.json",
+        default="datasets/data_for_finetuning/1-prompts/occupation.json",
         help="prompt template, and occupations for train and val",
     )
     parser.add_argument(
         '--classifier_weight_path', 
-        default="../data/2-trained-classifiers/CelebA_MobileNetLarge_08060852/epoch=9-step=12660_MobileNetLarge.pt",
+        default="datasets/data_for_finetuning/2-trained-classifiers/CelebA_MobileNetLarge_08060852/epoch=9-step=12660_MobileNetLarge.pt",
         help="pre-trained classifer that predicts binary gender", 
         type=str,
         required=False, 
@@ -200,7 +213,7 @@ def get_args():
         '--face_feats_path', 
         help="external face feats, used for the face realism preserving loss", 
         type=str, 
-        default="../data/3-face-features/CelebA_MobileNetLarge_08240859/face_feats.pkl"
+        default="datasets/data_for_finetuning/3-face-features/CelebA_MobileNetLarge_08240859/face_feats.pkl"
         )
     # parser.add_argument(
     #     '--aligned_face_gender_model_path', 
@@ -208,8 +221,8 @@ def get_args():
     #     type=str, 
     #     default="../data/3-face-features/CelebA_MobileNetLarge_08240859/epoch=9-step=6330_MobileNetLarge.pt"
     #     )
-    parser.add_argument('--opensphere_config', help="train, val, test batch size", type=str, default="../data/4-opensphere_checkpoints/opensphere_checkpoints/20220424_210641/config.yml")
-    parser.add_argument('--opensphere_model_path', help="train, val, test batch size", type=str, default="../data/4-opensphere_checkpoints/opensphere_checkpoints/20220424_210641/models/backbone_100000.pth")
+    parser.add_argument('--opensphere_config', help="train, val, test batch size", type=str, default="datasets/data_for_finetuning/4-opensphere_checkpoints/opensphere_checkpoints/20220424_210641/config.yml")
+    parser.add_argument('--opensphere_model_path', help="train, val, test batch size", type=str, default="datasets/data_for_finetuning/4-opensphere_checkpoints/opensphere_checkpoints/20220424_210641/models/backbone_100000.pth")
 
     # learning related settings
     parser.add_argument(

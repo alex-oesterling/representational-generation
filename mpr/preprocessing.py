@@ -89,13 +89,13 @@ def identity_embedding(args, encoder, dataloader, groups, query=True):
         else:
             raise ValueError(f'group {group} is not supported')
 
-        estimated_group = _group_estimation(feature,group, args.vision_encoder, onehot=args.mpr_onehot, loader=dataloader)
+        estimated_group = group_estimation(feature,group, args.vision_encoder, onehot=args.mpr_onehot, loader=dataloader)
         estimated_groups.append(estimated_group)
     estimated_groups = np.concatenate(estimated_groups, axis=1)
     print(estimated_groups.shape)
     return estimated_groups, feature_dic
             
-def _group_estimation(features, group='gender', vision_encoder_name='CLIP', onehot=False, loader=None):
+def group_estimation(features, group='gender', vision_encoder_name='CLIP', onehot=False, loader=None):
     path = '/n/holyscratch01/calmon_lab/Lab/datasets/mpr_stuffs/'
     if group in ['gender', 'age','race']:
         with open(os.path.join(path,'clfs',f'fairface_{vision_encoder_name}_clf_{group}.pkl'), 'rb') as f:

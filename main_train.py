@@ -55,6 +55,7 @@ def main(args):
         project_config=accelerator_project_config,
         kwargs_handlers=[kwargs]
     )
+    print(accelerator)
 
     # if args.report_to == "wandb":
     #     if not is_wandb_available():
@@ -101,14 +102,13 @@ def main(args):
                         }
                 }
             )
-    
 
     set_seed(args.seed, device_specific=True)
 
     dm = networks.ModelFactory.get_model(modelname=args.target_model, train=args.train)
     
     _trainer = trainer.TrainerFactory.get_trainer(trainername=args.trainer, model=dm, args=args)
-    _trainer.train()
+    _trainer.train(accelerator)
 
     model =_trainer.model
     # save model
