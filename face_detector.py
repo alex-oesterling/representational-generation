@@ -52,6 +52,17 @@ class FaceDetector:
                 # facess.append(faces.unsqueeze(dim=0))
                 # face_landmarks_app.append(torch.tensor(face_landmarks).unsqueeze(dim=0).to(device=images.device).to(images.dtype))
                 # aligned_facess_app.append(aligned_faces.unsqueeze(dim=0))
+            elif num_faces >= 1:
+                face_indicators.append(True)
+                max_area = 0
+                for face_bbox in faces_from_app:
+                    bbox = face_bbox.rect
+                    left, top, right, bottom = bbox.left(), bbox.top(), bbox.right(), bbox.bottom()
+                    area = (right-left)*(bottom-top)
+                    if area > max_area:
+                        max_area = area
+                        max_bbox = bbox
+                face_bboxs.append(max_bbox)
             else:
                 face_indicators.append(False)
         
