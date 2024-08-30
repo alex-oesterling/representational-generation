@@ -1,4 +1,4 @@
-
+import os
 import torch
 from torch import nn
 import math
@@ -9,7 +9,8 @@ from torchvision import transforms
 from skimage import transform
 from sentence_transformers import SentenceTransformer, util
 import kornia
-
+import numpy as np
+import face_recognition
 
 class FaceFeatsModel(torch.nn.Module):
     def __init__(self, face_feats_path):
@@ -48,6 +49,183 @@ class FaceFeatsModel(torch.nn.Module):
         else:
             return target_embeddings.data.detach().clone()
 
+def get_face_feats(net, data, flip=True, normalize=True, to_high_precision=True):
+    # extract features from the original 
+    # and horizontally flipped data
+    feats = net(data)
+    if flip:
+        data = torch.flip(data, [3])
+        feats += net(data)
+    if to_high_precision:
+        feats = feats.to(torch.float)
+    if normalize:
+        feats = torch.nn.functional.normalize(feats, dim=-1)
+    return feats
+
+def get_face(images, fill_value=-1):
+    """
+    images:shape [N,3,H,W], in range [-1,1], pytorch tensor
+    returns:
+        face_indicators: torch tensor of shape [N], only True or False
+            True means face is detected, False otherwise
+        face_bboxs: torch tensor of shape [N,4], 
+            if face_indicator is False, the corresponding face_bbox will be [fill_value,fill_value,fill_value,fill_value]
+        face_chips: torch tensor of shape [N,3,224,224]
+            if face_indicator is False, the corresponding face_chip will be all fill_value
+    """
+    face_indicators_app, face_bboxs_app, face_chips_app, face_landmarks_app, aligned_face_chips_app = get_face_app(images, fill_value=fill_value)
+
+    if face_indicators_app.logical_not().sum() > 0:
+        face_indicators_FR, face_bboxs_FR, face_chips_FR, face_landmarks_FR, aligned_face_chips_FR = get_face_FR(images[face_indicators_app.logical_not()], fill_value=fill_value)
+
+        face_bboxs_app[face_indicators_app.logical_not()] = face_bboxs_FR
+        face_chips_app[face_indicators_app.logical_not()] = face_chips_FR
+        face_landmarks_app[face_indicators_app.logical_not()] = face_landmarks_FR
+        aligned_face_chips_app[face_indicators_app.logical_not()] = aligned_face_chips_FR
+
+        face_indicators_app[face_indicators_app.logical_not()] = face_indicators_FR
+
+    return face_indicators_app, face_bboxs_app, face_chips_app, face_landmarks_app, aligned_face_chips_app
+
+def get_face_app(face_app, images, args, fill_value=-1):
+    """
+    images:shape [N,3,H,W], in range [-1,1], pytorch tensor
+    returns:
+        face_indicators: torch tensor of shape [N], only True or False
+            True means face is detected, False otherwise
+        face_bboxs: torch tensor of shape [N,4], 
+            if face_indicator is False, the corresponding face_bbox will be [fill_value,fill_value,fill_value,fill_value]
+        face_chips: torch tensor of shape [N,3,224,224]
+            if face_indicator is False, the corresponding face_chip will be all fill_value
+    """        
+    images_np = ((images*0.5 + 0.5)*255).cpu().detach().permute(0,2,3,1).float().numpy().astype(np.uint8)
+    
+    face_indicators_app = []
+    face_bboxs_app = []
+    face_chips_app = []
+    face_landmarks_app = []
+    aligned_face_chips_app = []
+    for idx, image_np in enumerate(images_np):
+        # face_app.get input should be [BGR]
+        faces_from_app = face_app.get(image_np[:,:,[2,1,0]])
+        if len(faces_from_app) == 0:
+            face_indicators_app.append(False)
+            face_bboxs_app.append([fill_value]*4)
+            face_chips_app.append(torch.ones([1,3,args.size_face,args.size_face], dtype=images.dtype, device=images.device)*(fill_value))
+            face_landmarks_app.append(torch.ones([1,5,2], dtype=images.dtype, device=images.device)*(fill_value))
+            aligned_face_chips_app.append(torch.ones([1,3,args.size_aligned_face,args.size_aligned_face], dtype=images.dtype, device=images.device)*(fill_value))
+        else:
+            face_from_app = get_largest_face_app(faces_from_app, dim_max=image_np.shape[0], dim_min=0)
+            bbox = expand_bbox(face_from_app["bbox"], expand_coef=0.5, target_ratio=1)
+            face_chip = crop_face(images[idx], bbox, target_size=[args.size_face,args.size_face], fill_value=fill_value)
+            
+            face_landmarks = np.array(face_from_app["kps"])
+            aligned_face_chip = image_pipeline(images[idx], face_landmarks)
+            
+            face_indicators_app.append(True)
+            face_bboxs_app.append(bbox)
+            face_chips_app.append(face_chip.unsqueeze(dim=0))
+            face_landmarks_app.append(torch.tensor(face_landmarks).unsqueeze(dim=0).to(device=images.device).to(images.dtype))
+            aligned_face_chips_app.append(aligned_face_chip.unsqueeze(dim=0))
+    
+    face_indicators_app = torch.tensor(face_indicators_app).to(device=images.device)
+    face_bboxs_app = torch.tensor(face_bboxs_app).to(device=images.device)
+    face_chips_app = torch.cat(face_chips_app, dim=0)
+    face_landmarks_app = torch.cat(face_landmarks_app, dim=0)
+    aligned_face_chips_app = torch.cat(aligned_face_chips_app, dim=0)
+    
+    return face_indicators_app, face_bboxs_app, face_chips_app, face_landmarks_app, aligned_face_chips_app
+            
+
+def get_face_FR(images, args, fill_value=-1):
+    """
+    images:shape [N,3,H,W], in range [-1,1], pytorch tensor
+    returns:
+        face_indicators: torch tensor of shape [N], only True or False
+            True means face is detected, False otherwise
+        face_bboxs: torch tensor of shape [N,4], 
+            if face_indicator is False, the corresponding face_bbox will be [fill_value,fill_value,fill_value,fill_value]
+        face_chips: torch tensor of shape [N,3,224,224]
+            if face_indicator is False, the corresponding face_chip will be all fill_value
+    """
+
+    images_np = ((images*0.5 + 0.5)*255).cpu().detach().permute(0,2,3,1).float().numpy().astype(np.uint8)
+    
+    face_indicators_FR = []
+    face_bboxs_FR = []
+    face_chips_FR = []
+    face_landmarks_FR = []
+    aligned_face_chips_FR = []
+    for idx, image_np in enumerate(images_np):
+        # import pdb; pdb.set_trace()
+        faces_from_FR = face_recognition.face_locations(image_np, model="cnn", number_of_times_to_upsample=0)
+        if len(faces_from_FR) == 0:
+            face_indicators_FR.append(False)
+            face_bboxs_FR.append([fill_value]*4)
+            face_chips_FR.append(torch.ones([1,3,args.size_face,args.size_face], dtype=images.dtype, device=images.device)*(fill_value))
+            face_landmarks_FR.append(torch.ones([1,5,2], dtype=images.dtype, device=images.device)*(fill_value))
+            aligned_face_chips_FR.append(torch.ones([1,3,args.size_aligned_face,args.size_aligned_face], dtype=images.dtype, device=images.device)*(fill_value))
+        else:
+            face_from_FR = get_largest_face_FR(faces_from_FR, dim_max=image_np.shape[0], dim_min=0)
+            bbox = face_from_FR
+            bbox = np.array((bbox[-1],) + bbox[:-1]) # need to convert bbox from face_recognition to the right order
+            bbox = expand_bbox(bbox, expand_coef=1.1, target_ratio=1) # need to use a larger expand_coef for FR
+            face_chip = crop_face(images[idx], bbox, target_size=[args.size_face,args.size_face], fill_value=fill_value)
+            
+            face_landmarks = face_recognition.face_landmarks(image_np, face_locations=[face_from_FR], model="large")
+
+            left_eye = np.array(face_landmarks[0]["left_eye"]).mean(axis=0)
+            right_eye = np.array(face_landmarks[0]["right_eye"]).mean(axis=0)
+            nose_tip = np.array(face_landmarks[0]["nose_bridge"][-1])
+            top_lip_left = np.array(face_landmarks[0]["top_lip"][0])
+            top_lip_right = np.array(face_landmarks[0]["top_lip"][6])
+            face_landmarks = np.stack([left_eye, right_eye, nose_tip, top_lip_left, top_lip_right])
+            
+            aligned_face_chip = image_pipeline(images[idx], face_landmarks)
+            
+            face_indicators_FR.append(True)
+            face_bboxs_FR.append(bbox)
+            face_chips_FR.append(face_chip.unsqueeze(dim=0))
+            face_landmarks_FR.append(torch.tensor(face_landmarks).unsqueeze(dim=0).to(device=images.device).to(images.dtype))
+            aligned_face_chips_FR.append(aligned_face_chip.unsqueeze(dim=0))
+    
+    face_indicators_FR = torch.tensor(face_indicators_FR).to(device=images.device)
+    face_bboxs_FR = torch.tensor(face_bboxs_FR).to(device=images.device)
+    face_chips_FR = torch.cat(face_chips_FR, dim=0)
+    face_landmarks_FR = torch.cat(face_landmarks_FR, dim=0)
+    aligned_face_chips_FR = torch.cat(aligned_face_chips_FR, dim=0)
+    
+    return face_indicators_FR, face_bboxs_FR, face_chips_FR, face_landmarks_FR, aligned_face_chips_FR
+
+
+def get_largest_face_FR(faces_from_FR, dim_max, dim_min):
+    if len(faces_from_FR) == 1:
+        return faces_from_FR[0]
+    elif len(faces_from_FR) > 1:
+        area_max = 0
+        idx_max = 0
+        for idx, bbox in enumerate(faces_from_FR):
+            bbox1 = np.array((bbox[-1],) + bbox[:-1])
+            area = (min(bbox1[2],dim_max) - max(bbox1[0], dim_min)) * (min(bbox1[3],dim_max) - max(bbox1[1], dim_min))
+            if area > area_max:
+                area_max = area
+                idx_max = idx
+        return faces_from_FR[idx_max]
+
+
+def get_largest_face_app(face_from_app, dim_max, dim_min):
+    if len(face_from_app) == 1:
+        return face_from_app[0]
+    elif len(face_from_app) > 1:
+        area_max = 0
+        idx_max = 0
+        for idx in range(len(face_from_app)):
+            bbox = face_from_app[idx]["bbox"]
+            area = (min(bbox[2],dim_max) - max(bbox[0], dim_min)) * (min(bbox[3],dim_max) - max(bbox[1], dim_min))
+            if area > area_max:
+                area_max = area
+                idx_max = idx
+        return face_from_app[idx_max]
 
 
 def image_grid(imgs, rows, cols):
