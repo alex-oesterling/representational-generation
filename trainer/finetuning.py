@@ -17,6 +17,7 @@ import os, sys
 
 from trainer import GenericTrainer
 from trainer.image_utils import FaceFeatsModel, image_grid, plot_in_grid, expand_bbox, crop_face, image_pipeline, get_face_feats
+from mpr.mpr import _oracle_function
 
 import itertools
 import logging
@@ -436,7 +437,12 @@ class Trainer(GenericTrainer):
         progress_bar.set_description("Steps")
         wandb_tracker = self.accelerator.get_tracker("wandb", unwrap=True)
 
+        # TODO: add curation set
+        curation_set = None
+
         for epoch in range(first_epoch, self.args.num_train_epochs):
+            mpr_set = None
+            #torch.zeros([len(train_dataloader_idxs[0])*self.args.mpr_num_batches, self.args.num_group_attributes], dtype=self.weight_dtype, device=self.accelerator.device)
             for step, data_idx in enumerate(train_dataloader_idxs[epoch]):            
                 
                 # Skip steps until we reach the resumed step
@@ -502,7 +508,13 @@ class Trainer(GenericTrainer):
                     face_indicators, face_bboxs, face_chips, face_landmarks, aligned_face_chips = get_face(images)
                     preds_gender, probs_gender, logits_gender = get_face_gender(face_chips, selector=face_indicators, fill_value=-1)
 
-                    
+                    if mpr_set is None:
+                        mpr_set = probs_attributes ## probs_attributes is a tensor of shape [num_faces, num_group_attributes]
+                    else:
+                        mpr_set = torch.cat([mpr_set, probs_attributes], dim=0)
+                    if mpr_set.shape[0] >= self.args.mpr_num_batches*targets.shape[0]:
+                        mpr_set = mpr_set[-self.args.mpr_num_batches*targets.shape[0]:] ## remove the oldest batch
+
                     face_feats = torch.ones([aligned_face_chips.shape[0],512], dtype=self.weight_dtype_high_precision, device=aligned_face_chips.device) * (-1)
                     if sum(face_indicators)>0:
                         face_feats_ = get_face_feats(face_feats_net, aligned_face_chips[face_indicators])
@@ -617,10 +629,21 @@ class Trainer(GenericTrainer):
                     loss_CLIP_ij = - (clip_feats_ij * clip_feats_ori_ij).sum(dim=-1) + 1
                     loss_DINO_ij = - (DINO_feats_ij * DINO_feats_ori_ij).sum(dim=-1) + 1
                     
-                    loss_fair_ij = torch.ones(len(idxs_ij), dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
-                    idxs_w_face_loss = ((face_indicators_ij == True) * (targets_ij != -1)).nonzero().view([-1])
-                    loss_fair_ij_w_face_loss = CE_loss(logits_gender_ij[idxs_w_face_loss], targets_ij[idxs_w_face_loss])
-                    loss_fair_ij[idxs_w_face_loss] = loss_fair_ij_w_face_loss
+                    oracle_function = _oracle_function(np.ones(self.args.mpr_num_batches*targets.shape[0]), mpr_set, curation_set, modelname='linear')
+                    oracle_function = torch.tensor(oracle_function, dtype=self.weight_dtype, device=self.accelerator.device) ##compute oracle over detached gradients precomputed
+                    mpr_set_with_gradients = mpr_set
+                    mpr_set_with_gradients[targets.shape[0]:][j*self.args.train_GPU_batch_size:(j+1)*self.args.train_GPU_batch_size] = probs_attributes_ij ## insert computation graph for attributes for batch i, device j
+                    expanded_dataset_with_gradients = torch.cat([mpr_set_with_gradients, curation_set], dim=0)
+                    c = torch.dot(expanded_dataset_with_gradients, oracle_function)
+
+                    k = self.args.mpr_num_batches*targets.shape[0]
+                    m = curation_set.shape[0]
+                    loss_mpr_ij = torch.abs(torch.sum((1/k)*c[:mpr_set.shape[0]]) - torch.sum((1/m)*c[mpr_set.shape[0]:]))
+
+                    # loss_fair_ij = torch.ones(len(idxs_ij), dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
+                    # idxs_w_face_loss = ((face_indicators_ij == True) * (targets_ij != -1)).nonzero().view([-1])
+                    # loss_fair_ij_w_face_loss = CE_loss(logits_gender_ij[idxs_w_face_loss], targets_ij[idxs_w_face_loss])
+                    # loss_fair_ij[idxs_w_face_loss] = loss_fair_ij_w_face_loss
                     
                     loss_face_ij = torch.ones(len(idxs_ij), dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
 
@@ -637,7 +660,7 @@ class Trainer(GenericTrainer):
                         loss_face_ij[idxs_w_face_feats_from_search] = (1 - (face_feats_2*face_feats_target_2).sum(dim=-1)).to(loss_face_ij.dtype)
 
                     dynamic_weights = gen_dynamic_weights(face_indicators_ij, targets_ij, preds_gender_ori_ij, probs_gender_ori_ij, factor=self.args.factor1)
-                    loss_ij = loss_fair_ij + self.args.weight_loss_img * dynamic_weights * (loss_CLIP_ij + loss_DINO_ij) + self.args.weight_loss_face * loss_face_ij
+                    loss_ij = loss_mpr_ij + self.args.weight_loss_img * dynamic_weights * (loss_CLIP_ij + loss_DINO_ij) + self.args.weight_loss_face * loss_face_ij
                     self.accelerator.backward(loss_ij.mean())
 
                     with torch.no_grad():
