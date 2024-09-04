@@ -25,7 +25,7 @@ def main(args):
     ## Compute MPR
     vision_encoder = networks.ModelFactory.get_model(modelname=args.vision_encoder, train=args.train)  
     vision_encoder = vision_encoder.cuda() if torch.cuda.is_available() else vision_encoder
-    
+
     ## Make embedding vectors
     print('extract embeddings from the reference distribution')
     refer_embedding, _ = identity_embedding(args, vision_encoder, refer_loader,args.mpr_group, query=False)
@@ -103,7 +103,7 @@ def main(args):
             
         else:
             score = np.sum(s_split)
-            MPR, c = getMPR(args, query_embedding_split, curation_set=refer_embedding_split, modelname=args.functionclass)
+            MPR, c = getMPR(args.mpr_group, query_embedding_split, curation_set=refer_embedding_split, modelname=args.functionclass, normalize=args.normalize)
             print(f'Concept: {args.target_concept}, final MPR: {MPR}, score: {score}')
         MPR_dic.append(MPR)
         score_dic.append(score)

@@ -7,10 +7,12 @@ def get_args():
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--n-workers', type=int, default=1)
     parser.add_argument('--target-model', type=str, default='SD_14') #required=True, 
-
+    parser.add_argument('--refer-dataset', type=str, default='fairface', choices=['fairface', 'stable_bias_i'])
+    parser.add_argument('--mpr-onehot', default=False, action='store_true', help='onehot group estimation')
+    
     # Hyperparameters for training
     parser.add_argument('--train', default=True, action='store_false', help='train the model')
-    parser.add_argument('--trainer', default='scratch', type=str, help='choose the trainer')
+    parser.add_argument('--trainer', default='finetuning', type=str, help='choose the trainer')
     parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
     parser.add_argument('-wd', '--weight_decay', default=0.0001, type=float, help='weight_decay')    
     parser.add_argument('--n-iters', default=50, type=int, help='total iterations')
@@ -30,11 +32,20 @@ def get_args():
     parser.add_argument('--save-dir', type=str, default='results/', help='directory to save the results')
 
     # for finetuning
+    parser.add_argument('--normalize', default=False, action='store_true', help='normalization for x')
+    parser.add_argument('--functionclass', type=str, default='linear', help='functionclass for mapr') # choices=['linear','dt','nn','l2'],
+    parser.add_argument('--mpr_num_batches', type=int, default=4, help='the number of batches for computing MPRs')
     parser.add_argument('--vision-encoder', type=str, default='CLIP',choices = ['BLIP', 'CLIP', 'PATHS'])
+    parser.add_argument(
+        "--max_train_steps",
+        type=int,
+        default=10000,
+        help="Total number of training steps to perform.  If provided, overrides num_train_epochs.",
+    )
     parser.add_argument(
         "--train_text_encoder",
         action="store_true",
-        default=True,
+        default=False,
         help="Whether to train the text encoder. If set, the text encoder should be float32 precision.",
     )
     parser.add_argument(

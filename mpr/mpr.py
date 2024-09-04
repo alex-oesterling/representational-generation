@@ -20,12 +20,12 @@ group_dic = {
                 'Goatee', 'Gray_Hair', 'Heavy_Makeup', 'Mustache', 'No_Beard', 'Sideburns', 'Smiling', 'Wearing_Hat']
 }
 
-def getMPR(args, dataset, k=0, curation_set=None, modelname=None, indices=None):
+def getMPR(groups, dataset, k=0, curation_set=None, modelname=None, indices=None, normalize=False):
     if indices is None:
         indices = np.ones(dataset.shape[0])
     k = int(np.sum(indices))
 
-    groups = args.mpr_group
+    # groups = args.mpr_group
 
     if 'boolean' in modelname:
         try:
@@ -39,12 +39,12 @@ def getMPR(args, dataset, k=0, curation_set=None, modelname=None, indices=None):
                 dataset = np.concatenate((dataset, np.prod(dataset[:,idxs], axis=1).reshape(-1,1)), axis=1)
                 curation_set = np.concatenate((curation_set, np.prod(curation_set[:,idxs], axis=1).reshape(-1,1)), axis=1)
     
-    if args.normalize and 'dt' not in modelname:
+    if normalize and 'dt' not in modelname:
         dataset = dataset / np.linalg.norm(dataset, axis=-1, keepdims=True)
         curation_set = curation_set / np.linalg.norm(curation_set, axis=-1, keepdims=True)
 
     if 'dt' not in modelname:
-        reg = _oracle_function(indices, dataset, curation_set=curation_set, modelname=modelname)
+        reg = oracle_function(indices, dataset, curation_set=curation_set, modelname=modelname)
         
         if curation_set is not None:
             expanded_dataset = np.concatenate((dataset, curation_set), axis=0)
@@ -115,7 +115,7 @@ def getMPR(args, dataset, k=0, curation_set=None, modelname=None, indices=None):
     return mpr, reg
 
 
-def _oracle_function(indices, dataset, curation_set=None, modelname='linear'):
+def oracle_function(indices, dataset, curation_set=None, modelname='linear'):
     if modelname == 'linear' or 'boolean' in modelname:
         # model = LinearRegression()
         k = int(np.sum(indices))

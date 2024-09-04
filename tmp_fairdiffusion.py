@@ -61,8 +61,7 @@ def main():
 
     base_path = f'/n/holyscratch01/calmon_lab/Lab/datasets/fairdiffusion'
     if args.trainer != 'scratch':
-        # group_name = "".join([g[0].upper() for g in args.group])
-        group_name = args.model_path.split("_")[-1].split(".")[0]
+        group_name = "".join([g[0].upper() for g in args.group])
         base_path = os.path.join(base_path, group_name)
     base_path = os.path.join(base_path, args.model)
     check_log_dir(base_path)

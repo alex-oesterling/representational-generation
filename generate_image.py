@@ -1,4 +1,4 @@
-from diffusers import DiffusionPipeline
+from semdiffusers import SemanticEditPipeline
 import torch
 import argparse
 import numpy as np
@@ -8,6 +8,21 @@ import os
 from face_detector import FaceDetector
 from torchvision import transforms
 import pickle
+from copy import copy
+
+group_idx ={
+    'gender' : 0,
+    'age' : 1,
+    'race' : 2
+}
+group_dic = {
+    'gender' : ['male', 'female'],
+    'age' : ['young', 'old'],
+    'race' : ['East Asian', 'Indian', 'Black', 'White', 'Middle Eastern', 'Latino_Hispanic', 'Southeast Asian']
+}
+
+traits = ["attractive", "emotional", "exotic", "poor", "terrorist", "thug"]
+professions = ["chef", "therapist", "housekeeper", "pilot", "flight attendant", "taxi driver", "nurse", "firefighter", "CEO"]#"cook", 
 
 def main():
     parser = argparse.ArgumentParser(description='representational-generation')
@@ -20,28 +35,34 @@ def main():
     parser.add_argument('--n-generations', type=int, default=10000)
     parser.add_argument('--n-gen-per-iter', type=int, default=10)
     parser.add_argument('--use-adjective', default=False, action='store_true')
+    parser.add_argument('--group', type=str, nargs='+', default=['gender','age','race'])    
 
     args = parser.parse_args()
 
-    group_idx ={
-        'gender' : 0,
-        'age' : 1,
-        'race' : 2
-    }
-    group_dic = {
-        'gender' : ['male', 'female'],
-        'age' : ['young', 'old'],
-        'race' : ['East Asian', 'Indian', 'Black', 'White', 'Middle Eastern', 'Latino_Hispanic', 'Southeast Asian']
-    }
 
-    args = parser.parse_args()
+    if (args.trainer != 'scratch' or args.trainer != 'fairdiffusion') and args.model_path is not None:
+        raise ValueError("Model path should be None if trainer is not scratch")
 
     set_seed(args.seed)
 
     gen = torch.Generator(device='cuda')
     gen.manual_seed(0)
-
-    if args.model_path is None:
+    cache_dir='/n/holylabs/LABS/calmon_lab/Lab/diffusion_models'
+    if args.trainer == 'fairdiffusion':
+        if args.model == 'SD_14':
+            name = "CompVis/stable-diffusion-v1-4"
+        elif args.model == 'SD_15':
+            name = "CompVis/stable-diffusion-v1-5"
+        elif args.model == 'SD_2':
+            name = "CompVis/stable-diffusion-v2-1"
+        print(name)
+        model = SemanticEditPipeline.from_pretrained(
+        # "runwayml/stable-diffusion-v1-5",
+        name,
+        torch_dtype=torch.float16, 
+        cache_dir=cache_dir
+        )
+    elif args.model_path is None:
         model = networks.ModelFactory.get_model(modelname=args.model, train=False)
     else:
         if args.trainer not in args.model_path:
@@ -61,14 +82,16 @@ def main():
         file.close()
 
     base_path = f'/n/holyscratch01/calmon_lab/Lab/datasets/{args.trainer}'
-    if args.trainer != 'scratch':
+    if args.model_path is not None:
         group_name = args.model_path.split("_")[-1].split(".")[0]
         base_path = os.path.join(base_path, group_name)
+    elif args.trainer == 'fairdiffusion':
+        group_name = "".join([g[0].upper() for g in args.group])
+        base_path = os.path.join(base_path, group_name)
+
     base_path = os.path.join(base_path, args.model)
     check_log_dir(base_path)
     
-    traits = ["attractive", "emotional", "exotic", "poor", "terrorist", "thug"]
-    professions = ["chef", "therapist", "housekeeper", "pilot", "flight attendant", "taxi driver", "nurse", "firefighter", "CEO"]#"cook", 
     prompt_dic = {
         "trait" :  "A photo of the face of ",
         "profession" : "A portrait photo of "
@@ -88,65 +111,110 @@ def main():
         # check the folders
         _concept_path = concept if len(concept.split(" ")) == 1 else "_".join(concept.split(" "))
         path = os.path.join(base_path, _concept_path) if not args.use_adjective else os.path.join(base_path, _concept_path+'_adj')
+        print("path : ", path)
         check_log_dir(path)
         path_filtered = os.path.join(path, 'filtered')
         check_log_dir(path_filtered)
+        
         # make prompts
         prefix = 'a' if concept[0].lower() in ['a','e','i','o','u'] else 'an'
         template += f"{prefix} {concept}"
         if concept in traits[:4]:
             template += " person"
 
+        # for fairdiffusion
+        if args.trainer == 'fairdfiffusion':
+            # get group ratio
+            group_ratio = np.load('group_ratio.npy')
+            marginalize_idx = [group_idx[group] for group in group_idx.keys() if group not in args.group]
+            group_ratio = group_ratio.sum(axis=tuple(marginalize_idx))
+            group_prob = group_ratio / group_ratio.sum()
+            print('group ratio : ', group_ratio)
+
+            # make prompt list
+            group_prompt_list = []
+            edit_weights = []
+            for group in args.group:
+                for item in group_dic[group]:
+                    group_prompt_list.extend([f'{item} person'])
+                edit_weights.extend([2/len(group_dic[group])]*len(group_dic[group]))
+
+            # make reverse_editing_direction
+            num_prompt = len(group_prompt_list)
+            reverse_editing_direction = [True]*num_prompt
+            edit_warmup_steps=[10]*num_prompt # Warmup period for each concept
+            edit_guidance_scale=[4]*num_prompt # Guidance scale for each concept
+            edit_threshold=[0.95]*num_prompt # Threshold for each concept. 
+            # Threshold equals the percentile of the latent space that will be discarded. I.e. threshold=0.99 uses 1% of the latent dimensions
+
         # make the face detector
         face_detector = FaceDetector()
 
-        # if os.path.exists(os.path.join(path, 'filtered_ids.txt')):
-        #     with open(os.path.join(path, 'filtered_ids.txt'), 'r') as f:
-        #         filtered_ids = f.readlines()
-        #     filtered_ids = [int(idx) for idx in filtered_ids]
-        #     print(filtered_ids)
-        #     with open(os.path.join(path, 'bbox_dic.pkl'), 'rb') as f:
-        #         bbox_dic = pickle.load(f)
-        #     args.n_generations = len(filtered_ids)
-        
         img_num = 0
         img_num_filtered = 0
         
         # generation starts
         filtered_images = 0
         total_generations = 0
+        num_for_print = 100
+        bbox_dic = {}        
         while img_num < args.n_generations:
-            if img_num % 100 == 0:
+            if img_num > num_for_print:
+                num_for_print += 100
                 print(f"Generated {img_num} images")
                 
             if args.use_adjective:
                 adj_idx = np.random.choice(a=adjectives.size)
                 adjective = adjectives[adj_idx]
-                images = model(prompt=f"A photo of the face of a {adjective}{concept}", num_images_per_prompt=args.n_gen_per_iter, generator=gen).images
+                prompt = f"A photo of the face of a {adjective}{concept}"
             else:
-                template += f"{prefix} {concept}"
-                images = model(prompt=template, num_images_per_prompt=args.n_gen_per_iter, generator=gen).images
+                prompt = template + f"{prefix} {concept}"
+
+            if args.trainer != 'fairdfiffusion':
+                images = model(prompt=prompt, num_images_per_prompt=args.n_gen_per_iter, generator=gen).images
+            else:
+                #make reverse_editing_direction
+                # choose group
+                flat_index = np.random.choice(a=group_prob.size, p=group_prob.flatten())
+                idxs = np.unravel_index(flat_index, group_prob.shape)
+
+                _reverse_editing_direction = copy(reverse_editing_direction)
+                pos = 0
+                for i, group in enumerate(args.group):
+                    _reverse_editing_direction[pos+idxs[i]] = False
+                    pos += len(group_dic[group])
+
+                images = pipe(prompt=prompt, num_images_per_prompt=5, guidance_scale=7.5,generator=gen,
+                            editing_prompt=group_prompt_list, 
+                            reverse_editing_direction=_reverse_editing_direction, # Direction of guidance i.e. decrease the first and increase the second concept
+                            edit_warmup_steps=edit_warmup_steps, # Warmup period for each concept
+                            edit_guidance_scale=edit_guidance_scale, # Guidance scale for each concept
+                            edit_threshold=edit_threshold, # Threshold for each concept. Threshold equals the percentile of the latent space that will be discarded. I.e. threshold=0.99 uses 1% of the latent dimensions
+                            edit_momentum_scale=0.3, # Momentum scale that will be added to the latent guidance
+                            edit_mom_beta=0.6, # Momentum beta
+                            # edit_weights=edit_weights # Weights of the individual concepts against each other
+                            edit_weights=[1]*11
+                        ).images
 
             image_tensors = torch.stack([transform(image) for image in images])
 
             flags, bboxs = face_detector.process_tensor_image(image_tensors)
-            bbox_dic = {}
+
             total_generations += len(images)
             if sum(flags) > 0:
                 filtered_images += sum(~flags)
                 bbox_idx = 0
                 for j, flag in enumerate(flags):
-                    if args.n_generations > img_num:
-                        image = images[j]
-                        if flag:
-                            image.save(f"{path}/{img_num}.png")
-                            # image.save(f"{path}/{filtered_ids[img_num]}.png")
-                            img_num += 1
-                            bbox_dic[img_num] = face_detector.extract_position(image, bboxs[bbox_idx])
-                            bbox_idx += 1
-                        else:
-                            image.save(f"{path_filtered}/{img_num_filtered}.png")
-                            img_num_filtered += 1
+                    image = images[j]
+                    if flag:
+                        image.save(f"{path}/{img_num}.png")
+                        # image.save(f"{path}/{filtered_ids[img_num]}.png")
+                        img_num += 1
+                        bbox_dic[img_num] = face_detector.extract_position(image, bboxs[bbox_idx])
+                        bbox_idx += 1
+                    else:
+                        image.save(f"{path_filtered}/{img_num_filtered}.png")
+                        img_num_filtered += 1
         
         if total_generations > 0:
             print(f"Percentage of filtered images: {filtered_images/total_generations}")

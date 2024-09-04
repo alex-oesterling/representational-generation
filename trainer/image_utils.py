@@ -10,7 +10,8 @@ from skimage import transform
 from sentence_transformers import SentenceTransformer, util
 import kornia
 import numpy as np
-
+import face_recognition
+import itertools
 class FaceFeatsModel(torch.nn.Module):
     def __init__(self, face_feats_path):
         super().__init__()
@@ -61,7 +62,7 @@ def get_face_feats(net, data, flip=True, normalize=True, to_high_precision=True)
         feats = torch.nn.functional.normalize(feats, dim=-1)
     return feats
 
-def get_face(images, fill_value=-1):
+def get_face(images, args, fill_value=-1):
     """
     images:shape [N,3,H,W], in range [-1,1], pytorch tensor
     returns:
@@ -72,68 +73,72 @@ def get_face(images, fill_value=-1):
         face_chips: torch tensor of shape [N,3,224,224]
             if face_indicator is False, the corresponding face_chip will be all fill_value
     """
-    face_indicators_app, face_bboxs_app, face_chips_app, face_landmarks_app, aligned_face_chips_app = get_face_app(images, fill_value=fill_value)
+    # face_indicators_app, face_bboxs_app, face_chips_app, face_landmarks_app, aligned_face_chips_app = get_face_app(face_app, images, args, fill_value=fill_value)
 
-    if face_indicators_app.logical_not().sum() > 0:
-        face_indicators_FR, face_bboxs_FR, face_chips_FR, face_landmarks_FR, aligned_face_chips_FR = get_face_FR(images[face_indicators_app.logical_not()], fill_value=fill_value)
 
-        face_bboxs_app[face_indicators_app.logical_not()] = face_bboxs_FR
-        face_chips_app[face_indicators_app.logical_not()] = face_chips_FR
-        face_landmarks_app[face_indicators_app.logical_not()] = face_landmarks_FR
-        aligned_face_chips_app[face_indicators_app.logical_not()] = aligned_face_chips_FR
+    # if face_indicators_app.logical_not().sum() > 0:
+    face_indicators_FR, face_bboxs_FR, face_chips_FR, face_landmarks_FR, aligned_face_chips_FR = get_face_FR(images, args, fill_value=fill_value)
 
-        face_indicators_app[face_indicators_app.logical_not()] = face_indicators_FR
+    # face_bboxs_app[face_indicators_app.logical_not()] = face_bboxs_FR
+    # face_chips_app[face_indicators_app.logical_not()] = face_chips_FR
+    # face_landmarks_app[face_indicators_app.logical_not()] = face_landmarks_FR
+    # aligned_face_chips_app[face_indicators_app.logical_not()] = aligned_face_chips_FR
 
-    return face_indicators_app, face_bboxs_app, face_chips_app, face_landmarks_app, aligned_face_chips_app
+    # face_indicators_app[face_indicators_app.logical_not()] = face_indicators_FR
 
-def get_face_app(face_app, images, args, fill_value=-1):
-    """
-    images:shape [N,3,H,W], in range [-1,1], pytorch tensor
-    returns:
-        face_indicators: torch tensor of shape [N], only True or False
-            True means face is detected, False otherwise
-        face_bboxs: torch tensor of shape [N,4], 
-            if face_indicator is False, the corresponding face_bbox will be [fill_value,fill_value,fill_value,fill_value]
-        face_chips: torch tensor of shape [N,3,224,224]
-            if face_indicator is False, the corresponding face_chip will be all fill_value
-    """        
-    images_np = ((images*0.5 + 0.5)*255).cpu().detach().permute(0,2,3,1).float().numpy().astype(np.uint8)
+    return face_indicators_FR, face_bboxs_FR, face_chips_FR, face_landmarks_FR, aligned_face_chips_FR
+
+# def get_face_app(images, args, fill_value=-1):
+#     """
+#     images:shape [N,3,H,W], in range [-1,1], pytorch tensor
+#     returns:
+#         face_indicators: torch tensor of shape [N], only True or False
+#             True means face is detected, False otherwise
+#         face_bboxs: torch tensor of shape [N,4], 
+#             if face_indicator is False, the corresponding face_bbox will be [fill_value,fill_value,fill_value,fill_value]
+#         face_chips: torch tensor of shape [N,3,224,224]
+#             if face_indicator is False, the corresponding face_chip will be all fill_value
+#     """        
+#     images_np = ((images*0.5 + 0.5)*255).cpu().detach().permute(0,2,3,1).float().numpy().astype(np.uint8)
     
-    face_indicators_app = []
-    face_bboxs_app = []
-    face_chips_app = []
-    face_landmarks_app = []
-    aligned_face_chips_app = []
-    for idx, image_np in enumerate(images_np):
-        # face_app.get input should be [BGR]
-        faces_from_app = face_app.get(image_np[:,:,[2,1,0]])
-        if len(faces_from_app) == 0:
-            face_indicators_app.append(False)
-            face_bboxs_app.append([fill_value]*4)
-            face_chips_app.append(torch.ones([1,3,args.size_face,args.size_face], dtype=images.dtype, device=images.device)*(fill_value))
-            face_landmarks_app.append(torch.ones([1,5,2], dtype=images.dtype, device=images.device)*(fill_value))
-            aligned_face_chips_app.append(torch.ones([1,3,args.size_aligned_face,args.size_aligned_face], dtype=images.dtype, device=images.device)*(fill_value))
-        else:
-            face_from_app = get_largest_face_app(faces_from_app, dim_max=image_np.shape[0], dim_min=0)
-            bbox = expand_bbox(face_from_app["bbox"], expand_coef=0.5, target_ratio=1)
-            face_chip = crop_face(images[idx], bbox, target_size=[args.size_face,args.size_face], fill_value=fill_value)
+#     face_indicators_app = []
+#     face_bboxs_app = []
+#     face_chips_app = []
+#     face_landmarks_app = []
+#     aligned_face_chips_app = []
+#     for idx, image_np in enumerate(images_np):
+#         # face_app.get input should be [BGR]
+#         # faces_from_app = face_app.get(image_np[:,:,[2,1,0]]) # insight face implementation
+#         faces_from_app = face_recognition.face_locations(image_np, model="cnn") # face_recognition implementation
+#         face_landmarks_from_app = face_recognition.face_landmarks(image_np)
+
+#         if len(faces_from_app) == 0:
+#             face_indicators_app.append(False)
+#             face_bboxs_app.append([fill_value]*4)
+#             face_chips_app.append(torch.ones([1,3,args.size_face,args.size_face], dtype=images.dtype, device=images.device)*(fill_value))
+#             face_landmarks_app.append(torch.ones([1,5,2], dtype=images.dtype, device=images.device)*(fill_value))
+#             aligned_face_chips_app.append(torch.ones([1,3,args.size_aligned_face,args.size_aligned_face], dtype=images.dtype, device=images.device)*(fill_value))
+#         else:
+#             max_idx = get_largest_face_app_idx(faces_from_app, dim_max=image_np.shape[0], dim_min=0) ## get index of largest face for face_recognition implementation
+#             bbox = expand_bbox(faces_from_app[max_idx], expand_coef=0.5, target_ratio=1) ##use to get face bbox
+#             face_chip = crop_face(images[idx], bbox, target_size=[args.size_face,args.size_face], fill_value=fill_value)
             
-            face_landmarks = np.array(face_from_app["kps"])
-            aligned_face_chip = image_pipeline(images[idx], face_landmarks)
+#             face_landmarks = np.array(face_landmarks_from_app[max_idx]) ##use to get face landmarks. TODO see if these landmarks are the same as insightface
+#             aligned_face_chip = image_pipeline(images[idx], face_landmarks)
             
-            face_indicators_app.append(True)
-            face_bboxs_app.append(bbox)
-            face_chips_app.append(face_chip.unsqueeze(dim=0))
-            face_landmarks_app.append(torch.tensor(face_landmarks).unsqueeze(dim=0).to(device=images.device).to(images.dtype))
-            aligned_face_chips_app.append(aligned_face_chip.unsqueeze(dim=0))
+#             face_indicators_app.append(True)
+#             face_bboxs_app.append(bbox)
+#             face_chips_app.append(face_chip.unsqueeze(dim=0))
+#             face_landmarks_app.append(torch.tensor(face_landmarks).unsqueeze(dim=0).to(device=images.device).to(images.dtype))
+#             aligned_face_chips_app.append(aligned_face_chip.unsqueeze(dim=0))
     
-    face_indicators_app = torch.tensor(face_indicators_app).to(device=images.device)
-    face_bboxs_app = torch.tensor(face_bboxs_app).to(device=images.device)
-    face_chips_app = torch.cat(face_chips_app, dim=0)
-    face_landmarks_app = torch.cat(face_landmarks_app, dim=0)
-    aligned_face_chips_app = torch.cat(aligned_face_chips_app, dim=0)
+#     face_indicators_app = torch.tensor(face_indicators_app).to(device=images.device)
+#     face_bboxs_app = torch.tensor(face_bboxs_app).to(device=images.device)
+#     face_chips_app = torch.cat(face_chips_app, dim=0)
+#     face_landmarks_app = torch.cat(face_landmarks_app, dim=0)
+#     aligned_face_chips_app = torch.cat(aligned_face_chips_app, dim=0)
     
-    return face_indicators_app, face_bboxs_app, face_chips_app, face_landmarks_app, aligned_face_chips_app
+#     return face_indicators_app, face_bboxs_app, face_chips_app, face_landmarks_app, aligned_face_chips_app
             
 
 def get_face_FR(images, args, fill_value=-1):
@@ -212,7 +217,7 @@ def get_largest_face_FR(faces_from_FR, dim_max, dim_min):
         return faces_from_FR[idx_max]
 
 
-def get_largest_face_app(face_from_app, dim_max, dim_min):
+def get_largest_face_app_idx(face_from_app, dim_max, dim_min):
     if len(face_from_app) == 1:
         return face_from_app[0]
     elif len(face_from_app) > 1:
@@ -224,7 +229,7 @@ def get_largest_face_app(face_from_app, dim_max, dim_min):
             if area > area_max:
                 area_max = area
                 idx_max = idx
-        return face_from_app[idx_max]
+        return idx_max
 
 
 def image_grid(imgs, rows, cols):
@@ -238,58 +243,171 @@ def image_grid(imgs, rows, cols):
         grid.paste(img, box=(i%cols*w, i//cols*h))
     return grid
 
-def plot_in_grid(images, save_to, face_indicators=None, face_bboxs=None, preds_gender=None, pred_class_probs_gender=None):
+def plot_in_grid_gender_race_age(images, save_to, face_indicators=None, face_bboxs=None, preds_gender=None, pred_class_probs_gender=None, preds_race=None, pred_class_probs_race=None, preds_age=None, pred_class_probs_age=None):
     """
     images: torch tensor in shape of [N,3,H,W], in range [-1,1]
     """
-    images_w_face = images[face_indicators]
-    images_wo_face = images[face_indicators.logical_not()]
-
-    # first reorder everything from most to least male, from most to least female, and finally images without faces
-    idxs_male = (preds_gender == 1).nonzero(as_tuple=False).view([-1])
-    probs_male = pred_class_probs_gender[idxs_male]
-    idxs_male = idxs_male[probs_male.argsort(descending=True)]
-
-    idxs_female = (preds_gender == 0).nonzero(as_tuple=False).view([-1])
-    probs_female = pred_class_probs_gender[idxs_female]
-    idxs_female = idxs_female[probs_female.argsort(descending=True)]
-
-    idxs_no_face = (preds_gender == -1).nonzero(as_tuple=False).view([-1])
+    
+    idxs_reordered = []
+    for g in [1,0]:
+        for r in [0,1,2,3]:
+            for a in [0,1]:
+                idxs_ = ((preds_gender==g) * (preds_race == r) * (preds_age == a)).nonzero(as_tuple=False).view([-1])
+                probs_ = pred_class_probs_gender[idxs_]
+                idxs_ = idxs_[probs_.argsort(descending=True)]
+                idxs_reordered.append(idxs_)
+                
+    idxs_no_face = (preds_race == -1).nonzero(as_tuple=False).view([-1])
+    idxs_reordered.append(idxs_no_face)    
+    idxs_reordered = torch.cat(idxs_reordered) 
 
     images_to_plot = []
-    idxs_reordered = torch.torch.cat([idxs_male, idxs_female, idxs_no_face])
-    
     for idx in idxs_reordered:
         img = images[idx]
         face_indicator = face_indicators[idx]
         face_bbox = face_bboxs[idx]
         pred_gender = preds_gender[idx]
         pred_class_prob_gender = pred_class_probs_gender[idx]
+        pred_race = preds_race[idx]
+        pred_class_prob_race = pred_class_probs_race[idx]
+        pred_age = preds_age[idx]
+        pred_class_prob_age = pred_class_probs_age[idx]
         
-        if pred_gender == 1:
-            pred = "Male"
-            border_color = "blue"
-        elif pred_gender == 0:
-            pred = "Female"
-            border_color = "red"
+        if pred_gender == 0:
+            gender_border_color = "red"
+        elif pred_gender == 1:
+            gender_border_color = "blue"
         elif pred_gender == -1:
-            pred = "Undetected"
-            border_color = "white"
+            gender_border_color = "white"
+
+        if pred_race == 0:
+            race_border_color = "limegreen"
+        elif pred_race == 1:
+            race_border_color = "Black"
+        elif pred_race == 2:
+            race_border_color = "brown"
+        elif pred_race == 3:
+            race_border_color = "orange"
+        elif pred_race == -1:
+            race_border_color = "white"
         
+        if pred_age == 0:
+            age_border_color = "darkorange"
+        elif pred_age == 1:
+            age_border_color = "darkgreen"
+        elif pred_age == -1:
+            age_border_color = "white"
+
         img_pil = transforms.ToPILImage()(img*0.5+0.5)
         img_pil_draw = ImageDraw.Draw(img_pil)  
-        img_pil_draw.rectangle(face_bbox.tolist(), fill =None, outline =border_color, width=4)
+        img_pil_draw.rectangle(face_bbox.tolist(), fill =None, outline ="black", width=4)
 
-        img_pil = ImageOps.expand(img_pil, border=(50,0,0,0),fill=border_color)
-
+        img_pil = ImageOps.expand(img_pil_draw._image, border=(50,0,0,0),fill=age_border_color)
+        img_pil_draw = ImageDraw.Draw(img_pil)
+        if pred_class_prob_race.item() < 1:
+            img_pil_draw.rectangle([(0,0),(50,(1-pred_class_prob_age.item())*512)], fill ="white", outline =None)
+            
+        img_pil = ImageOps.expand(img_pil_draw._image, border=(50,0,0,0),fill=race_border_color)
+        img_pil_draw = ImageDraw.Draw(img_pil)
+        if pred_class_prob_race.item() < 1:
+            img_pil_draw.rectangle([(0,0),(50,(1-pred_class_prob_race.item())*512)], fill ="white", outline =None)
+            
+        img_pil = ImageOps.expand(img_pil_draw._image, border=(50,0,0,0),fill=gender_border_color)
         img_pil_draw = ImageDraw.Draw(img_pil)
         if pred_class_prob_gender.item() < 1:
             img_pil_draw.rectangle([(0,0),(50,(1-pred_class_prob_gender.item())*512)], fill ="white", outline =None)
-
+            
         fnt = ImageFont.truetype(font="../data/0-utils/arial-bold.ttf", size=100)
         img_pil_draw.text((400, 400), f"{idx.item()}", align ="left", font=fnt)
 
         img_pil = ImageOps.expand(img_pil_draw._image, border=(10,10,10,10),fill="black")
+        
+        images_to_plot.append(img_pil)
+        
+    N_imgs = len(images_to_plot)
+    N1 = int(math.sqrt(N_imgs))
+    N2 = math.ceil(N_imgs / N1)
+
+    for i in range(N1*N2-N_imgs):
+        images_to_plot.append(
+            Image.new('RGB', color="white", size=images_to_plot[0].size)
+        )
+    grid = image_grid(images_to_plot, N1, N2)
+    if not os.path.exists(os.path.dirname(save_to)):
+        os.makedirs(os.path.dirname(save_to))
+    grid.save(save_to, quality=25)
+
+def plot_in_grid(images, save_to, face_indicators=None, face_bboxs=None, preds_group=None, probs_group=None, group=['gender','age','rage']):
+    """
+    images: torch tensor in shape of [N,3,H,W], in range [-1,1]
+    """
+    group_dic = {
+        'gender' : ['male', 'female'],
+        'age' : ['young', 'old'],
+        'race' : ['East Asian', 'Indian', 'Black', 'White', 'Middle Eastern', 'Latino_Hispanic', 'Southeast Asian']
+    }
+    images_w_face = images[face_indicators]
+    images_wo_face = images[face_indicators.logical_not()]
+
+    # tmp = [list(range(len(group_dic[_g]))) for _g in group]
+    # num_group = len(group)
+    # idxs_reordered = []
+    # for g in itertools.product(*tmp):
+    #     idxs_ = preds_group[:,0] == g[0]
+    #     if num_group > 1:
+    #         for i in range(1,num_group):
+    #             idxs_ = idxs_ * (preds_group[:,i] == g[i])
+    #     idxs_ = idxs_.nonzero(as_tuple=False).view([-1])
+    #     probs_ = probs_group[:,:2].max(dim=-1).values
+    #     idxs_ = idxs_[probs_.argsort(descending=True)]
+    #     idxs_reordered.append(idxs_)
+        
+
+    # idxs_male = (preds_gender == 1).nonzero(as_tuple=False).view([-1])
+    # probs_male = pred_class_probs_gender[idxs_male]
+    # idxs_male = idxs_male[probs_male.argsort(descending=True)]
+
+    # idxs_female = (preds_gender == 0).nonzero(as_tuple=False).view([-1])
+    # probs_female = pred_class_probs_gender[idxs_female]
+    # idxs_female = idxs_female[probs_female.argsort(descending=True)]
+
+    # idxs_no_face = (preds_gender == -1).nonzero(as_tuple=False).view([-1])
+
+    images_to_plot = []
+    # idxs_reordered = torch.torch.cat([idxs_male, idxs_female, idxs_no_face])
+    
+    # for idx in idxs_reordered:
+    for idx in range(len(images)):
+        img = images[idx]
+        face_indicator = face_indicators[idx]
+        face_bbox = face_bboxs[idx]
+        # pred_gender = preds_gender[idx]
+        # pred_class_prob_gender = pred_class_probs_gender[idx]
+        
+        # if pred_gender == 1:
+        #     pred = "Male"
+        #     border_color = "blue"
+        # elif pred_gender == 0:
+        #     pred = "Female"
+        #     border_color = "red"
+        # elif pred_gender == -1:
+        #     pred = "Undetected"
+        #     border_color = "white"
+        
+        img_pil = transforms.ToPILImage()(img*0.5+0.5)
+        # img_pil_draw = ImageDraw.Draw(img_pil)  
+        # img_pil_draw.rectangle(face_bbox.tolist(), fill =None, outline =border_color, width=4)
+
+        # img_pil = ImageOps.expand(img_pil, border=(50,0,0,0),fill=border_color)
+
+        # img_pil_draw = ImageDraw.Draw(img_pil)
+        # if pred_class_prob_gender.item() < 1:
+            # img_pil_draw.rectangle([(0,0),(50,(1-pred_class_prob_gender.item())*512)], fill ="white", outline =None)
+
+        # fnt = ImageFont.truetype(font="../data/0-utils/arial-bold.ttf", size=100)
+        # img_pil_draw.text((400, 400), f"{idx.item()}", align ="left", font=fnt)
+
+        # img_pil = ImageOps.expand(img_pil_draw._image, border=(10,10,10,10),fill="black")
         
         images_to_plot.append(img_pil)
         

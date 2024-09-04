@@ -16,9 +16,11 @@
 import os, sys
 
 from trainer import GenericTrainer
-from trainer.image_utils import FaceFeatsModel, plot_in_grid, get_face_feats, get_face
+from trainer.image_utils import FaceFeatsModel, image_grid, plot_in_grid, expand_bbox, crop_face, image_pipeline, get_face_feats, get_face
 import data_handler
 import networks
+from mpr.mpr import oracle_function
+from mpr.mpr import getMPR
 
 import itertools
 import logging
@@ -67,6 +69,7 @@ from diffusers.models.attention_processor import (
 from diffusers.optimization import get_scheduler
 from diffusers.loaders import AttnProcsLayers
 from diffusers.training_utils import EMAModel
+from peft import LoraConfig
 
 # you MUST import torch before insightface
 # otherwise onnxruntime, used by FaceAnalysis, can only use CPU
@@ -111,8 +114,9 @@ class Trainer(GenericTrainer):
     def _set_group_clfs(self, groups):
         path = '/n/holyscratch01/calmon_lab/Lab/datasets/mpr_stuffs/'
         self.group_classifier_dic = {}
-        vision_encoder = networks.ModelFactory.get_model(modelname=self.args.vision_encoder, train=False)
+        vision_encoder = networks.ModelFactory.get_model(modelname=self.args.vision_encoder)  
         self.group_classifier_dic['vision_encoder'] = vision_encoder
+        print(f"weight dtype: {self.weight_dtype}")
         self.group_classifier_dic['vision_encoder'].to(self.accelerator.device, dtype=self.weight_dtype)
         self.group_classifier_dic['vision_encoder'].requires_grad_(False)
         self.group_classifier_dic['vision_encoder'].eval()
@@ -123,12 +127,12 @@ class Trainer(GenericTrainer):
                 with open(os.path.join(path,'clfs',f'fairface_{self.args.vision_encoder}_clf_{group}.pkl'), 'rb') as f:
                     clf = pickle.load(f)
                 
-                in_features = clf.coef_.shape[1]
-                out_features = clf.coef_.shape[0]
+                in_features = clf.best_estimator_.coef_.shape[1]
+                out_features = clf.best_estimator_.coef_.shape[0]
                 
                 linear_clf = nn.Linear(in_features, out_features)
-                linear_clf.weight.data = torch.tensor(clf.coef_, dtype=self.weight_dtype)
-                linear_clf.bias.data = torch.tensor(clf.intercept_, dtype=self.weight_dtype)
+                linear_clf.weight.data = torch.tensor(clf.best_estimator_.coef_, dtype=self.weight_dtype)
+                linear_clf.bias.data = torch.tensor(clf.best_estimator_.intercept_, dtype=self.weight_dtype)
 
                 self.group_classifier_dic[group] = linear_clf
                 self.group_classifier_dic[group].to(self.accelerator.device, dtype=self.weight_dtype)
@@ -139,49 +143,15 @@ class Trainer(GenericTrainer):
 
             elif group == 'face':
                 continue
-        
         self.output_dim = output_dim
 
-    def _get_group_predictions(self, face_chips, selector=None, fill_value=-1):
-        groups = self.args.trainer_group
 
-        if selector != None:
-            face_chips_w_faces = face_chips[selector]
-        else:
-            face_chips_w_faces = face_chips
-
-        if not hasattr(self, "group_classifier_dic"):
-            self._set_group_clfs(groups)
-
-        if face_chips_w_faces.shape[0] == 0: # if there is no face from generated images,
-            logits_group = torch.empty([0,self.output_dim], dtype=face_chips.dtype, device=face_chips.device)
-            probs_group = torch.empty([0,self.output_dim], dtype=face_chips.dtype, device=face_chips.device)
-            preds_group = torch.empty([0], dtype=torch.int64, device=face_chips.device)
-        else:
-            embeddings = self.group_classifier_dic['vision_encoder'](face_chips_w_faces)
-            logits_group = []
-            for group in groups:
-                if group == 'face':
-                    continue
-                
-                clf = self.group_classifier_dic[group]
-                logits_group.append(clf(embeddings))
-            logits_group = torch.cat(logits_group, dim=1)
-        
-        if selector != None:
-            logits_group_new = torch.ones(
-                [selector.shape[0]]+list(logits_group.shape[1:]),
-                dtype=logits_group.dtype, 
-                device=logits_group.device
-                ) * (fill_value)
-            logits_group_new[selector] = logits_group
-        return logits_group_new
 
 
     def train(self, accelerator=None):
         model = self.model
         self.accelerator = accelerator
-        tokenizer = CLIPTokenizer.from_pretrained(
+        self.tokenizer = CLIPTokenizer.from_pretrained(
             model.name_or_path,
             subfolder="tokenizer"
             )
@@ -229,35 +199,49 @@ class Trainer(GenericTrainer):
             self.eval_unet.to(self.accelerator.device, dtype=self.weight_dtype)
 
         if self.args.train_unet:
-            unet_lora_procs = {}
-            for name in self.unet.attn_processors.keys():
-                cross_attention_dim = None if name.endswith("attn1.processor") else self.unet.config.cross_attention_dim
-                if name.startswith("mid_block"):
-                    hidden_size = self.unet.config.block_out_channels[-1]
-                elif name.startswith("up_blocks"):
-                    block_id = int(name[len("up_blocks.")])
-                    hidden_size = list(reversed(self.unet.config.block_out_channels))[block_id]
-                elif name.startswith("down_blocks"):
-                    block_id = int(name[len("down_blocks.")])
-                    hidden_size = self.unet.config.block_out_channels[block_id]
+            # unet_lora_procs = {}
+            # for name in self.unet.attn_processors.keys():
+            #     cross_attention_dim = None if name.endswith("attn1.processor") else self.unet.config.cross_attention_dim
+            #     if name.startswith("mid_block"):
+            #         hidden_size = self.unet.config.block_out_channels[-1]
+            #     elif name.startswith("up_blocks"):
+            #         block_id = int(name[len("up_blocks.")])
+            #         hidden_size = list(reversed(self.unet.config.block_out_channels))[block_id]
+            #     elif name.startswith("down_blocks"):
+            #         block_id = int(name[len("down_blocks.")])
+            #         hidden_size = self.unet.config.block_out_channels[block_id]
 
-                unet_lora_procs[name] = LoRAAttnProcessor(
-                    hidden_size=hidden_size,
-                    cross_attention_dim=cross_attention_dim,
-                    rank=self.args.rank,
-                ).to(self.accelerator.device)
+            #     unet_lora_procs[name] = LoRAAttnProcessor(
+            #         hidden_size=hidden_size,
+            #         cross_attention_dim=cross_attention_dim,
+            #         rank=self.args.rank,
+            #     ).to(self.accelerator.device)
                 
-            self.unet.set_attn_processor(unet_lora_procs)
-            unet_lora_layers = AttnProcsLayers(self.unet.attn_processors)
+            # self.unet.set_attn_processor(unet_lora_procs)
+            # unet_lora_layers = AttnProcsLayers(self.unet.attn_processors)
+
+            unet_lora_config = LoraConfig(
+                r=self.args.rank,
+                lora_alpha=self.args.rank,
+                init_lora_weights="gaussian",
+                target_modules=["to_k", "to_q", "to_v", "to_out.0"],
+            )
+
+            self.unet.add_adapter(unet_lora_config)
+            unet_lora_layers = filter(lambda p: p.requires_grad, self.unet.parameters())
+            unet_lora_layers = list(filter(lambda p: p.requires_grad, self.unet.parameters()))
+            self.unet_lora_layers = unet_lora_layers
             
-            for p in unet_lora_layers.parameters():
-                torch.distributed.broadcast(p, src=0)
+            # for p in unet_lora_layers.parameters():
+                # torch.distributed.broadcast(p, src=0)
             
-            unet_lora_ema = EMAModel(unet_lora_layers.parameters(), decay=self.args.EMA_decay)
+            unet_lora_ema = EMAModel(filter(lambda p: p.requires_grad, self.unet.parameters()), decay=self.args.EMA_decay)
             unet_lora_ema.to(self.accelerator.device)
             
             # print to check whether unet lora & ema is identical across devices
-            print(f"{self.accelerator.device}; unet lora init to: {list(unet_lora_layers.parameters())[0].flatten()[1]:.6f}; unet lora ema init to: {unet_lora_ema.shadow_params[0].flatten()[1]:.6f}")
+            # print(f"{self.accelerator.device}; unet lora init to: {list(unet_lora_layers.parameters())[0].flatten()[1]:.6f}; unet lora ema init to: {unet_lora_ema.shadow_params[0].flatten()[1]:.6f}")
+            
+            # print(f"{self.accelerator.device}; unet lora init to: {list(unet_lora_layers)[0].flatten()[1]:.6f}; unet lora ema init to: {unet_lora_ema.shadow_params[0].flatten()[1]:.6f}")
 
         if self.args.train_text_encoder:
             # ensure that dtype is float32, even if rest of the model that isn't trained is loaded in fp16
@@ -320,15 +304,19 @@ class Trainer(GenericTrainer):
         if self.args.allow_tf32:
             torch.backends.cuda.matmul.allow_tf32 = True
 
+        print("unet lora : ", unet_lora_layers)
+
         if self.args.train_text_encoder and self.args.train_unet:
             params_to_optimize = itertools.chain(unet_lora_layers.parameters(), text_encoder_lora_model.parameters())
         elif self.args.train_text_encoder and not self.args.train_unet:
             params_to_optimize = text_encoder_lora_model.parameters()
         elif not self.args.train_text_encoder and self.args.train_unet:
-            params_to_optimize = unet_lora_layers.parameters()
-        
+            # params_to_optimize = unet_lora_layers.parameters()
+            params_to_optimize = unet_lora_layers
+
+
         optimizer = torch.optim.AdamW(
-            params_to_optimize,
+            list(params_to_optimize),
             lr=self.args.learning_rate,
             betas=(self.args.adam_beta1, self.args.adam_beta2),
             weight_decay=self.args.adam_weight_decay,
@@ -440,7 +428,7 @@ class Trainer(GenericTrainer):
             text_encoder_lora_model, text_encoder_lora_ema = self.accelerator.prepare(text_encoder_lora_model, text_encoder_lora_ema)
             self.accelerator.register_for_checkpointing(text_encoder_lora_ema)
         if self.args.train_unet:
-            unet_lora_layers, unet_lora_ema = self.accelerator.prepare(unet_lora_layers, unet_lora_ema)
+            self.unet_lora_layers, self.unet_lora_ema = self.accelerator.prepare(unet_lora_layers, unet_lora_ema)
             self.accelerator.register_for_checkpointing(unet_lora_ema)
         
         # Train!
@@ -486,7 +474,10 @@ class Trainer(GenericTrainer):
         progress_bar.set_description("Steps")
         self.wandb_tracker = self.accelerator.get_tracker("wandb", unwrap=True)
 
+        curation_set = get_curation_set(self.args)
+        mpr_set = None
         for epoch in range(first_epoch, self.args.num_train_epochs):
+            #torch.zeros([len(train_dataloader_idxs[0])*self.args.mpr_num_batches, self.args.num_group_attributes], dtype=self.weight_dtype, device=self.accelerator.device)
             for step, data_idx in enumerate(train_dataloader_idxs[epoch]):            
                 
                 # Skip steps until we reach the resumed step
@@ -495,7 +486,7 @@ class Trainer(GenericTrainer):
                     continue
 
                 if self.global_step == 0:
-                    self.evaluation_step(self.global_step)
+                    self.evaluation_step(prompts_val, self.global_step)
 
                 # get prompt, should be identical across processes
                 prompt_i = train_dataset.__getitem__(data_idx)
@@ -549,12 +540,17 @@ class Trainer(GenericTrainer):
                         images.append(images_ij)
                     images = torch.cat(images)
 
-                    face_indicators, face_bboxs, face_chips, face_landmarks, aligned_face_chips = get_face(images)
+                    face_indicators, face_bboxs, face_chips, face_landmarks, aligned_face_chips = get_face(images, self.args)
                     
-                    # TO DO 
-                    preds_gender, probs_gender, logits_gender = self._get_group_predictions(face_chips, selector=face_indicators, fill_value=-1)
+                    preds_group, probs_group = self._get_group_predictions(face_chips, selector=face_indicators, fill_value=-1)
 
-                    
+                    if mpr_set is None:
+                        mpr_set = probs_group ## probs_attributes is a tensor of shape [num_faces, num_group_attributes]
+                    else:
+                        mpr_set = torch.cat([mpr_set, probs_group], dim=0)
+                    if mpr_set.shape[0] >= self.args.mpr_num_batches*noises_i.shape[0]:
+                        mpr_set = mpr_set[-self.args.mpr_num_batches*noises_i.shape[0]:] ## remove the oldest batch
+
                     face_feats = torch.ones([aligned_face_chips.shape[0],512], dtype=self.weight_dtype_high_precision, device=aligned_face_chips.device) * (-1)
                     if sum(face_indicators)>0:
                         face_feats_ = get_face_feats(self.face_feats_net, aligned_face_chips[face_indicators])
@@ -567,36 +563,41 @@ class Trainer(GenericTrainer):
                     
                     images_all = customized_all_gather(images, self.accelerator, return_tensor_other_processes=False)
                     face_bboxs_all = customized_all_gather(face_bboxs, self.accelerator, return_tensor_other_processes=False)
-                    preds_gender_all = customized_all_gather(preds_gender, self.accelerator, return_tensor_other_processes=False)
-                    probs_gender_all = customized_all_gather(probs_gender, self.accelerator, return_tensor_other_processes=False)
+                    preds_group_all = customized_all_gather(preds_group, self.accelerator, return_tensor_other_processes=False)
+                    probs_group_all = customized_all_gather(probs_group, self.accelerator, return_tensor_other_processes=False)
                     # face_real_scores_all = customized_all_gather(face_real_scores, self.accelerator, return_tensor_other_processes=False)
                     if self.accelerator.is_main_process:
                         if step % self.args.train_plot_every_n_iter == 0:
                             save_to = os.path.join(self.args.imgs_save_dir, f"train-{self.global_step}_generated.jpg")
-                            plot_in_grid(images_all, save_to, face_indicators=face_indicators_all, face_bboxs=face_bboxs_all, preds_gender=preds_gender_all, pred_class_probs_gender=probs_gender_all.max(dim=-1).values)
-
+                            # plot_in_grid(images_all, save_to, face_indicators=face_indicators_all, face_bboxs=face_bboxs_all, preds_gender=preds_group_all, pred_class_probs_gender=probs_group_all.max(dim=-1).values)
+                            plot_in_grid(images_all, save_to, face_indicators=face_indicators_all, face_bboxs=face_bboxs_all, preds_group=preds_group_all, probs_group=probs_group_all, group=self.args.trainer_group)
                             log_imgs_i["img_generated"] = [save_to]
 
                     if self.accelerator.is_main_process:
-                        probs_tmp = probs_gender_all[(probs_gender_all!=-1).all(dim=-1)]
-                        gender_gap = (((probs_tmp[:,1]>=0.5)*(probs_tmp[:,1]<=1)).float().mean() - ((probs_tmp[:,1]>=0)*(probs_tmp[:,1]<=0.5)).float().mean()).item()
-                        gender_pred_between_02_08 = ((probs_tmp[:,1]>=0.2)*(probs_tmp[:,1]<=0.8)).float().mean().item()
-                        logs_i["gender_gap"].append(gender_gap)
-                        logs_i["gender_gap_abs"].append(abs(gender_gap))
-                        logs_i["gender_pred_between_0.2_0.8"].append(gender_pred_between_02_08)
+                        probs_tmp = probs_group_all[(probs_group_all!=-1).all(dim=-1)]
+                        logs_i["mpr"] = getMPR(self.args.trainer_group, mpr_set, 
+                                               curation_set=curation_set, 
+                                               modelname=self.args.functionclass, 
+                                               normalize=self.args.normalize)
+                        # gender_gap = (((probs_tmp[:,1]>=0.5)*(probs_tmp[:,1]<=1)).float().mean() - ((probs_tmp[:,1]>=0)*(probs_tmp[:,1]<=0.5)).float().mean()).item()
+                        # gender_pred_between_02_08 = ((probs_tmp[:,1]>=0.2)*(probs_tmp[:,1]<=0.8)).float().mean().item()
+                        # logs_i["gender_gap"].append(gender_gap)
+                        # logs_i["gender_gap_abs"].append(abs(gender_gap))
+                        # logs_i["gender_pred_between_0.2_0.8"].append(gender_pred_between_02_08)
 
                     ################################################
                     # Step 2: generate dynamic targets 
                     # also broadcast from process idx 0, just in case targets_all computed might be different on different processes
                     # TO DO : skip
-                    targets_all, uncertainty_all = self.generate_dynamic_targets(probs_gender_all, w_uncertainty=True)
-                    torch.distributed.broadcast(targets_all, src=0)
-                    torch.distributed.broadcast(uncertainty_all, src=0)
 
-                    targets_all[uncertainty_all>self.args.uncertainty_threshold] = -1
-                    targets = targets_all[probs_gender.shape[0]*(self.accelerator.local_process_index):probs_gender.shape[0]*(self.accelerator.local_process_index+1)]
-                    uncertainty = uncertainty_all[probs_gender.shape[0]*(self.accelerator.local_process_index):probs_gender.shape[0]*(self.accelerator.local_process_index+1)]
-                    self.accelerator.print(f"\tNum faces to compute grads: {(targets_all!=-1).sum().item()}/{targets_all.shape[0]}")
+                    # targets_all, uncertainty_all = self.generate_dynamic_targets(probs_gender_all, w_uncertainty=True)
+                    # torch.distributed.broadcast(targets_all, src=0)
+                    # torch.distributed.broadcast(uncertainty_all, src=0)
+
+                    # targets_all[uncertainty_all>self.args.uncertainty_threshold] = -1
+                    # targets = targets_all[probs_group.shape[0]*(self.accelerator.local_process_index):probs_group.shape[0]*(self.accelerator.local_process_index+1)]
+                    # uncertainty = uncertainty_all[probs_group.shape[0]*(self.accelerator.local_process_index):probs_group.shape[0]*(self.accelerator.local_process_index+1)]
+                    # self.accelerator.print(f"\tNum faces to compute grads: {(targets_all!=-1).sum().item()}/{targets_all.shape[0]}")
 
                     ################################################
                     # Step 3: generate all original images using the original diffusion model
@@ -615,8 +616,8 @@ class Trainer(GenericTrainer):
                         images_ori.append(images_ij)
                     images_ori = torch.cat(images_ori)
 
-                    face_indicators_ori, face_bboxs_ori, face_chips_ori, face_landmarks_ori, aligned_face_chips_ori = get_face(images_ori)
-                    preds_gender_ori, probs_gender_ori, logits_gender_ori = self.get_face_group(face_chips_ori, selector=face_indicators_ori, fill_value=-1)
+                    face_indicators_ori, face_bboxs_ori, face_chips_ori, face_landmarks_ori, aligned_face_chips_ori = get_face(images_ori, self.args)
+                    preds_group_ori, probs_group_ori = self._get_group_predictions(face_chips_ori, selector=face_indicators_ori, fill_value=-1)
                     
                     images_small_ori = transforms.Resize(self.args.img_size_small)(images_ori)
                     clip_feats_ori = self.get_clip_feat(images_small_ori, normalize=True, to_high_precision=True)
@@ -625,46 +626,45 @@ class Trainer(GenericTrainer):
                     images_ori_all = customized_all_gather(images_ori, self.accelerator, return_tensor_other_processes=False)
                     face_indicators_ori_all = customized_all_gather(face_indicators_ori, self.accelerator, return_tensor_other_processes=False)
                     face_bboxs_ori_all = customized_all_gather(face_bboxs_ori, self.accelerator, return_tensor_other_processes=False)
-                    preds_gender_ori_all = customized_all_gather(preds_gender_ori, self.accelerator, return_tensor_other_processes=False)
-                    probs_gender_ori_all = customized_all_gather(probs_gender_ori, self.accelerator, return_tensor_other_processes=False)
+                    preds_group_ori_all = customized_all_gather(preds_group_ori, self.accelerator, return_tensor_other_processes=False)
+                    probs_group_ori_all = customized_all_gather(probs_group_ori, self.accelerator, return_tensor_other_processes=False)
 
                     face_feats_ori = get_face_feats(self.face_feats_net, aligned_face_chips_ori)
                     
                     if self.accelerator.is_main_process:
                         if step % self.args.train_plot_every_n_iter == 0:
                             save_to = os.path.join(self.args.imgs_save_dir, f"train-{self.global_step}_ori.jpg")
-                            plot_in_grid(images_ori_all, save_to, face_indicators=face_indicators_ori_all, face_bboxs=face_bboxs_ori_all, preds_gender=preds_gender_ori_all, pred_class_probs_gender=probs_gender_ori_all.max(dim=-1).values)
+                            plot_in_grid(images_ori_all, save_to, face_indicators=face_indicators_ori_all, face_bboxs=face_bboxs_ori_all, preds_group=preds_group_ori_all, probs_group=probs_group_ori_all, group=self.args.trainer_group)
 
                             log_imgs_i["img_ori"] = [save_to]
                 
                 ################################################
                 # Step 4: compute loss
-                loss_fair_i = torch.ones(targets.shape, dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
-                loss_face_i = torch.ones(targets.shape, dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
-                loss_CLIP_i = torch.ones(targets.shape, dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
-                loss_DINO_i = torch.ones(targets.shape, dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
-                loss_i = torch.ones(targets.shape, dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
+                # loss_fair_i = torch.ones(noises_i.shape, dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
+                # loss_face_i = torch.ones(noises_i.shape, dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
+                loss_CLIP_i = torch.ones(noises_i.shape[0], dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
+                loss_DINO_i = torch.ones(noises_i.shape[0], dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
+                loss_i = torch.ones(noises_i.shape[0], dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
                 
-                idxs_i = list(range(targets.shape[0]))
-                N_backward = math.ceil(targets.shape[0] / self.args.train_GPU_batch_size)
+                idxs_i = list(range(noises_i.shape[0]))
+                N_backward = math.ceil(noises_i.shape[0] / self.args.train_GPU_batch_size)
                 for j in range(N_backward):
                     idxs_ij = idxs_i[j*self.args.train_GPU_batch_size:(j+1)*self.args.train_GPU_batch_size]
                     noises_ij = noises_i[idxs_ij]
-                    targets_ij = targets[idxs_ij]
+                    # targets_ij = targets[idxs_ij]
                     clip_feats_ori_ij = clip_feats_ori[idxs_ij]
                     DINO_feats_ori_ij = DINO_feats_ori[idxs_ij]
-                    preds_gender_ori_ij = preds_gender_ori[idxs_ij]
-                    probs_gender_ori_ij = probs_gender_ori[idxs_ij]
+                    preds_group_ori_ij = preds_group_ori[idxs_ij]
+                    probs_group_ori_ij = probs_group_ori[idxs_ij]
                     face_bboxs_ori_ij = face_bboxs_ori[idxs_ij]
                     face_feats_ori_ij = face_feats_ori[idxs_ij]
                     
                     images_ij = self.generate_image_w_gradient(prompt_i, noises_ij, num_denoising_steps, which_text_encoder=self.text_encoder, which_unet=self.unet)
-                    face_indicators_ij, face_bboxs_ij, face_chips_ij, face_landmarks_ij, aligned_face_chips_ij = get_face(images_ij)
+                    face_indicators_ij, face_bboxs_ij, face_chips_ij, face_landmarks_ij, aligned_face_chips_ij = get_face(images_ij, self.args)
                     
-                    # TO DO
-                    preds_gender_ij, probs_gender_ij, logits_gender_ij = self.get_face_group(face_chips_ij, selector=face_indicators_ij, fill_value=-1)
+                    preds_group_ij, probs_group_ij = self._get_group_predictions(face_chips_ij, selector=face_indicators_ij, fill_value=-1)
                     
-                    images_ij = self.apply_grad_hook_face(images_ij, face_bboxs_ij, face_bboxs_ori_ij, targets_ij, preds_gender_ori_ij, probs_gender_ori_ij, factor=self.args.factor2)
+                    images_ij = self.apply_grad_hook_face(images_ij, face_bboxs_ij, face_bboxs_ori_ij, preds_group_ori_ij, probs_group_ori_ij, factor=self.args.factor2)
                     images_small_ij = transforms.Resize(self.args.img_size_small)(images_ij)
                     clip_feats_ij = self.get_clip_feat(images_small_ij, normalize=True, to_high_precision=True)
                     DINO_feats_ij = self.get_dino_feat(images_small_ij, normalize=True, to_high_precision=True)
@@ -673,42 +673,60 @@ class Trainer(GenericTrainer):
                     loss_DINO_ij = - (DINO_feats_ij * DINO_feats_ori_ij).sum(dim=-1) + 1
 
                     # TO DO                     
-                    loss_fair_ij = torch.ones(len(idxs_ij), dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
-                    idxs_w_face_loss = ((face_indicators_ij == True) * (targets_ij != -1)).nonzero().view([-1])
-                    loss_fair_ij_w_face_loss = CE_loss(logits_gender_ij[idxs_w_face_loss], targets_ij[idxs_w_face_loss])
-                    loss_fair_ij[idxs_w_face_loss] = loss_fair_ij_w_face_loss
+                    # loss_fair_ij = torch.ones(len(idxs_ij), dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
+                    # idxs_w_face_loss = ((face_indicators_ij == True) * (targets_ij != -1)).nonzero().view([-1])
+                    # loss_fair_ij_w_face_loss = CE_loss(logits_gender_ij[idxs_w_face_loss], targets_ij[idxs_w_face_loss])
+                    # loss_fair_ij[idxs_w_face_loss] = loss_fair_ij_w_face_loss
                     
-                    loss_face_ij = torch.ones(len(idxs_ij), dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
+                    oracle_function = oracle_function(np.ones(self.args.mpr_num_batches*noises_i.shape[0]), mpr_set, curation_set, modelname='linear')
+                    oracle_function = torch.tensor(oracle_function, dtype=self.weight_dtype, device=self.accelerator.device) ##compute oracle over detached gradients precomputed
+                    mpr_set_with_gradients = mpr_set
+                    mpr_set_with_gradients[noises_i.shape[0]:][j*self.args.train_GPU_batch_size:(j+1)*self.args.train_GPU_batch_size] = probs_group_ij ## insert computation graph for attributes for batch i, device j
+                    expanded_dataset_with_gradients = torch.cat([mpr_set_with_gradients, curation_set], dim=0)
+                    c = torch.dot(expanded_dataset_with_gradients, oracle_function)
 
-                    idxs_w_face_feats_from_ori = ((face_indicators_ij==True) * (targets_ij!=-1) * (targets_ij==preds_gender_ori_ij) * (probs_gender_ori_ij.max(dim=-1).values>=self.args.face_gender_confidence_level)).nonzero().view([-1]).tolist()
-                    if len(idxs_w_face_feats_from_ori)>0:
-                        face_feats_1 = get_face_feats(self.face_feats_net, aligned_face_chips_ij[idxs_w_face_feats_from_ori])
-                        face_feats_target_1 = face_feats_ori_ij[idxs_w_face_feats_from_ori]
-                        loss_face_ij[idxs_w_face_feats_from_ori] = (1 - (face_feats_1*face_feats_target_1).sum(dim=-1)).to(loss_face_ij.dtype)
+                    k = self.args.mpr_num_batches*noises_i.shape[0]
+                    m = curation_set.shape[0]
+                    loss_mpr_ij = torch.abs(torch.sum((1/k)*c[:mpr_set.shape[0]]) - torch.sum((1/m)*c[mpr_set.shape[0]:]))
+
+                    # loss_fair_ij = torch.ones(len(idxs_ij), dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
+                    # idxs_w_face_loss = ((face_indicators_ij == True) * (targets_ij != -1)).nonzero().view([-1])
+                    # loss_fair_ij_w_face_loss = CE_loss(logits_gender_ij[idxs_w_face_loss], targets_ij[idxs_w_face_loss])
+                    # loss_fair_ij[idxs_w_face_loss] = loss_fair_ij_w_face_loss
                     
-                    idxs_w_face_feats_from_search = list(set(((face_indicators_ij==True) * (targets_ij!=-1) ).nonzero().view([-1]).tolist()) - set(idxs_w_face_feats_from_ori))
-                    if len(idxs_w_face_feats_from_search)>0:
-                        face_feats_2 = get_face_feats(self.face_feats_net, aligned_face_chips_ij[idxs_w_face_feats_from_search])
-                        face_feats_target_2 = self.face_feats_model.semantic_search(face_feats_2, face_indicators_ij[idxs_w_face_feats_from_search])
-                        loss_face_ij[idxs_w_face_feats_from_search] = (1 - (face_feats_2*face_feats_target_2).sum(dim=-1)).to(loss_face_ij.dtype)
+                    # loss_face_ij = torch.ones(len(idxs_ij), dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
 
-                    # TO DO
-                    dynamic_weights = self.gen_dynamic_weights(face_indicators_ij, targets_ij, preds_gender_ori_ij, probs_gender_ori_ij, factor=self.args.factor1)
-                    loss_ij = loss_fair_ij + self.args.weight_loss_img * dynamic_weights * (loss_CLIP_ij + loss_DINO_ij) + self.args.weight_loss_face * loss_face_ij
+                    # idxs_w_face_feats_from_ori = ((face_indicators_ij==True) * (targets_ij!=-1) * (targets_ij==preds_gender_ori_ij) * (probs_gender_ori_ij.max(dim=-1).values>=self.args.face_gender_confidence_level)).nonzero().view([-1]).tolist()
+                    # idxs_w_face_feats_from_ori = ((face_indicators_ij==True) * (targets_ij==preds_gender_ori_ij) * (probs_gender_ori_ij.max(dim=-1).values>=self.args.face_gender_confidence_level)).nonzero().view([-1]).tolist()
+                    # if len(idxs_w_face_feats_from_ori)>0:
+                    #     face_feats_1 = get_face_feats(self.face_feats_net, aligned_face_chips_ij[idxs_w_face_feats_from_ori])
+                    #     face_feats_target_1 = face_feats_ori_ij[idxs_w_face_feats_from_ori]
+                    #     loss_face_ij[idxs_w_face_feats_from_ori] = (1 - (face_feats_1*face_feats_target_1).sum(dim=-1)).to(loss_face_ij.dtype)
+                    
+                    # idxs_w_face_feats_from_search = list(set(((face_indicators_ij==True) * (targets_ij!=-1) ).nonzero().view([-1]).tolist()) - set(idxs_w_face_feats_from_ori))
+                    # if len(idxs_w_face_feats_from_search)>0:
+                    #     face_feats_2 = get_face_feats(self.face_feats_net, aligned_face_chips_ij[idxs_w_face_feats_from_search])
+                    #     face_feats_target_2 = self.face_feats_model.semantic_search(face_feats_2, face_indicators_ij[idxs_w_face_feats_from_search])
+                    #     loss_face_ij[idxs_w_face_feats_from_search] = (1 - (face_feats_2*face_feats_target_2).sum(dim=-1)).to(loss_face_ij.dtype)
 
+                    # dynamic_weights = self.gen_dynamic_weights(face_indicators_ij, targets_ij, preds_gender_ori_ij, probs_gender_ori_ij, factor=self.args.factor1)
+                    # loss_ij = loss_mpr_ij + self.args.weight_loss_img * dynamic_weights * (loss_CLIP_ij + loss_DINO_ij) + self.args.weight_loss_face * loss_face_ij
+                    loss_ij = loss_mpr_ij + self.args.weight_loss_img * (loss_CLIP_ij + loss_DINO_ij) 
                     self.accelerator.backward(loss_ij.mean())
 
                     with torch.no_grad():
-                        loss_fair_i[idxs_ij] = loss_fair_ij.to(loss_fair_i.dtype)
-                        loss_face_i[idxs_ij] = loss_face_ij.to(loss_face_i.dtype)
+                        # loss_fair_i[idxs_ij] = loss_fair_ij.to(loss_fair_i.dtype)
+                        loss_i[idxs_ij] = loss_ij.to(loss_i.dtype)
+                        # loss_face_i[idxs_ij] = loss_face_ij.to(loss_face_i.dtype)
                         loss_CLIP_i[idxs_ij] = loss_CLIP_ij.to(loss_CLIP_i.dtype)
                         loss_DINO_i[idxs_ij] = loss_DINO_ij.to(loss_DINO_i.dtype)
                         loss_i[idxs_ij] = loss_ij.to(loss_i.dtype)
                         
                 # for logging purpose, gather all losses to main_process
                 self.accelerator.wait_for_everyone()
-                loss_fair_all = customized_all_gather(loss_fair_i, self.accelerator)
-                loss_face_all = customized_all_gather(loss_face_i, self.accelerator)
+                # loss_fair_all = customized_all_gather(loss_fair_i, self.accelerator)
+                # loss_face_all = customized_all_gather(loss_face_i, self.accelerator)
+                loss_all = customized_all_gather(loss_i, self.accelerator)
                 loss_CLIP_all = customized_all_gather(loss_CLIP_i, self.accelerator)
                 loss_DINO_all = customized_all_gather(loss_DINO_i, self.accelerator)
                 loss_all = customized_all_gather(loss_i, self.accelerator)
@@ -718,8 +736,9 @@ class Trainer(GenericTrainer):
                 loss_face_all = loss_face_all[loss_face_all!=-1]
 
                 if self.accelerator.is_main_process:
-                    logs_i["loss_fair"].append(loss_fair_all)
-                    logs_i["loss_face"].append(loss_face_all)
+                    # logs_i["loss_fair"].append(loss_fair_all)
+                    # logs_i["loss_face"].append(loss_face_all)
+                    loss_i["loss_MPR"].append(loss_all)
                     logs_i["loss_CLIP"].append(loss_CLIP_all)
                     logs_i["loss_DINO"].append(loss_DINO_all)
                     logs_i["loss"].append(loss_all)
@@ -792,7 +811,7 @@ class Trainer(GenericTrainer):
                     if self.args.train_text_encoder:
                         text_encoder_lora_ema.step(  text_encoder_lora_params )
                     if self.args.train_unet:
-                        unet_lora_ema.step(  unet_lora_layers.parameters() )
+                        unet_lora_ema.step(  self.unet_lora_layers )
 
                 progress_bar.update(1)
                 self.global_step += 1
@@ -805,13 +824,13 @@ class Trainer(GenericTrainer):
                             self.wandb_tracker.log({f"train_TE_lora_norm": param_norm}, step=self.global_step)
                             self.wandb_tracker.log({f"train_TE_lora_ema_norm": param_ema_norm}, step=self.global_step)
                         if self.args.train_unet:
-                            param_norm = np.mean([p.norm().item() for p in unet_lora_layers.parameters()])
+                            param_norm = np.mean([p.norm().item() for p in self.unet_lora_layers])
                             param_ema_norm = np.mean([p.norm().item() for p in unet_lora_ema.shadow_params])
                             self.wandb_tracker.log({f"train_unet_lora_norm": param_norm}, step=self.global_step)
                             self.wandb_tracker.log({f"train_unet_lora_ema_norm": param_ema_norm}, step=self.global_step)
 
                 if self.global_step % self.args.evaluate_every_n_iter == 0:
-                    self.evaluation_step(self.global_step)
+                    self.evaluation_step(prompts_val, self.global_step)
 
                 if self.accelerator.is_main_process:
                     if self.global_step % self.args.checkpointing_steps == 0:
@@ -848,8 +867,8 @@ class Trainer(GenericTrainer):
         prompts = [prompt] * N
         
         prompts_token = self.tokenizer(prompts, return_tensors="pt", padding=True)
-        prompts_token["input_ids"] = prompts_token["input_ids"].to(self.self.accelerator.device)
-        prompts_token["attention_mask"] = prompts_token["attention_mask"].to(self.self.accelerator.device)
+        prompts_token["input_ids"] = prompts_token["input_ids"].to(self.accelerator.device)
+        prompts_token["attention_mask"] = prompts_token["attention_mask"].to(self.accelerator.device)
 
         prompt_embeds = which_text_encoder(
             prompts_token["input_ids"],
@@ -867,8 +886,8 @@ class Trainer(GenericTrainer):
                 truncation=True,
                 return_tensors="pt",
             )
-        uncond_input["input_ids"] = uncond_input["input_ids"].to(self.self.accelerator.device)
-        uncond_input["attention_mask"] = uncond_input["attention_mask"].to(self.self.accelerator.device)
+        uncond_input["input_ids"] = uncond_input["input_ids"].to(self.accelerator.device)
+        uncond_input["attention_mask"] = uncond_input["attention_mask"].to(self.accelerator.device)
         negative_prompt_embeds = which_text_encoder(
             uncond_input["input_ids"],
             uncond_input["attention_mask"],
@@ -909,7 +928,7 @@ class Trainer(GenericTrainer):
         noises: [N,4,64,64], N is number images to be generated for the prompt
         """
         # to enable gradient_checkpointing, unet must be set to train()
-        self.self.unet.train()
+        self.unet.train()
         
         N = noises.shape[0]
         prompts = [prompt] * N
@@ -1080,7 +1099,7 @@ class Trainer(GenericTrainer):
         if self.args.train_unet:
             with torch.no_grad():
                 unet_lora_layers_copy = copy.deepcopy(self.unet_lora_layers)
-                for p, p_from in itertools.zip_longest(list(self.unet_lora_layers.parameters()), self.unet_lora_ema.shadow_params):
+                for p, p_from in itertools.zip_longest(list(self.unet_lora_layers), self.unet_lora_ema.shadow_params):
                     p.data = p_from.data
 
     @torch.no_grad()
@@ -1110,17 +1129,17 @@ class Trainer(GenericTrainer):
                     images_ij = self.generate_image_no_gradient(prompt_i, noises_ij, num_denoising_steps, which_text_encoder=self.text_encoder, which_unet=self.eval_unet)
                 images_ori.append(images_ij)
             images_ori = torch.cat(images_ori)
-            face_indicators_ori, face_bboxs_ori, face_chips_ori, face_landmarks_ori, aligned_face_chips_ori = get_face(images_ori)
-            preds_gender_ori, probs_gender_ori, logits_gender_ori = self.get_face_group(face_chips_ori, selector=face_indicators_ori, fill_value=-1)
+            face_indicators_ori, face_bboxs_ori, face_chips_ori, face_landmarks_ori, aligned_face_chips_ori = get_face(images_ori, self.args)
+            preds_group_ori, probs_group_ori = self._get_group_predictions(face_chips_ori, selector=face_indicators_ori, fill_value=-1)
             
-            face_feats_ori = get_face_feats(self.self.face_feats_net, aligned_face_chips_ori)
+            face_feats_ori = get_face_feats(self.face_feats_net, aligned_face_chips_ori)
             _, face_real_scores_ori = self.face_feats_model.semantic_search(face_feats_ori, selector=face_indicators_ori, return_similarity=True)
 
             images_ori_all = customized_all_gather(images_ori, self.accelerator, return_tensor_other_processes=False)
             face_indicators_ori_all = customized_all_gather(face_indicators_ori, self.accelerator, return_tensor_other_processes=False)
             face_bboxs_ori_all = customized_all_gather(face_bboxs_ori, self.accelerator, return_tensor_other_processes=False)
-            preds_gender_ori_all = customized_all_gather(preds_gender_ori, self.accelerator, return_tensor_other_processes=False)
-            probs_gender_ori_all = customized_all_gather(probs_gender_ori, self.accelerator, return_tensor_other_processes=False)
+            preds_group_ori_all = customized_all_gather(preds_group_ori, self.accelerator, return_tensor_other_processes=False)
+            probs_group_ori_all = customized_all_gather(probs_group_ori, self.accelerator, return_tensor_other_processes=False)
             face_real_scores_ori_all = customized_all_gather(face_real_scores_ori, self.accelerator, return_tensor_other_processes=False)
 
             if self.accelerator.is_main_process:
@@ -1129,8 +1148,9 @@ class Trainer(GenericTrainer):
                     images_ori_all, 
                     save_to, 
                     face_indicators=face_indicators_ori_all, face_bboxs=face_bboxs_ori_all, 
-                    preds_gender=preds_gender_ori_all, 
-                    pred_class_probs_gender=probs_gender_ori_all.max(dim=-1).values,
+                    preds_group=preds_group_ori_all, 
+                    probs_group=probs_group_ori_all,
+                    group=self.args.trainer_group
                     # face_real_scores=face_real_scores_ori_all
                 )
 
@@ -1145,8 +1165,8 @@ class Trainer(GenericTrainer):
                 images.append(images_ij)
             images = torch.cat(images)
             
-            face_indicators, face_bboxs, face_chips, face_landmarks, aligned_face_chips = get_face(images)
-            preds_gender, probs_gender, logits_gender = self.get_face_group(face_chips, selector=face_indicators, fill_value=-1)
+            face_indicators, face_bboxs, face_chips, face_landmarks, aligned_face_chips = get_face(images, self.args)
+            preds_gender, probs_gender = self._get_group_predictions(face_chips, selector=face_indicators, fill_value=-1)
             
             face_feats = get_face_feats(self.face_feats_net, aligned_face_chips)
             _, face_real_scores = self.face_feats_model.semantic_search(face_feats, selector=face_indicators, return_similarity=True)
@@ -1165,8 +1185,9 @@ class Trainer(GenericTrainer):
                     save_to, 
                     face_indicators=face_indicators_all, 
                     face_bboxs=face_bboxs_all, 
-                    preds_gender=preds_gender_all, 
-                    pred_class_probs_gender=probs_gender_all.max(dim=-1).values,
+                    preds_group=preds_gender_all, 
+                    probs_group=probs_gender_all,
+                    group=self.args.trainer_group
                     # face_real_scores=face_real_scores
                     )
 
@@ -1217,12 +1238,62 @@ class Trainer(GenericTrainer):
                     ) 
         
         return logs, log_imgs
-    
-    def apply_grad_hook_face(self, images, face_bboxs, face_bboxs_ori, targets, preds_gender_ori, probs_gender_ori, factor=0.1):
+
+    def _get_group_predictions(self, face_chips, selector=None, fill_value=-1):
+        groups = self.args.trainer_group
+
+        if selector != None:
+            face_chips_w_faces = face_chips[selector]
+        else:
+            face_chips_w_faces = face_chips
+
+        if not hasattr(self, "group_classifier_dic"):
+            self._set_group_clfs(groups)
+
+        if face_chips_w_faces.shape[0] == 0: # if there is no face from generated images,
+            probs_group = torch.empty([0,self.output_dim], dtype=face_chips.dtype, device=face_chips.device)
+            preds_group = torch.empty([0], dtype=face_chips.dtype, device=face_chips.device)
+        else:
+            embeddings = self.group_classifier_dic['vision_encoder'].encode_image(face_chips_w_faces)
+            probs_group = []
+            preds_group = []
+            for group in groups:
+                if group == 'face':
+                    continue
+                
+                clf = self.group_classifier_dic[group]
+                logits = clf(embeddings)
+                probs = torch.softmax(logits, dim=-1)
+                probs_group.append(probs)
+                temp = probs.max(dim=-1)
+                preds = temp.indices
+                preds_group.append(preds)
+
+            probs_group = torch.cat(probs_group, dim=-1)
+            preds_group = torch.stack(preds_group, dim=-1)
+        
+        if selector != None:
+            probs_group_new = torch.ones(
+                [selector.shape[0]]+list(probs_group.shape[1:]),
+                dtype=probs_group.dtype, 
+                device=probs_group.device
+                ) * (fill_value)
+            probs_group_new[selector] = probs_group
+            preds_group_new = torch.ones(
+                [selector.shape[0]]+list(preds_group.shape[1:]), 
+                dtype=preds_group.dtype, 
+                device=preds_group.device
+                ) * (fill_value)
+            preds_group_new[selector] = preds_group
+
+        return preds_group_new, probs_group_new
+
+    def apply_grad_hook_face(self, images, face_bboxs, face_bboxs_ori, preds_group_ori, probs_group_ori, factor=0.1):
         """apply gradient hook on non-face regions of the generated images
         """
         images_new = []
-        for image, face_bbox, face_bbox_ori, target, pred_gender_ori, prob_gender_ori in itertools.zip_longest(images, face_bboxs, face_bboxs_ori, targets, preds_gender_ori, probs_gender_ori):
+        # for image, face_bbox, face_bbox_ori, target, pred_gender_ori, prob_gender_ori in itertools.zip_longest(images, face_bboxs, face_bboxs_ori, targets, preds_gender_ori, probs_gender_ori):
+        for image, face_bbox, face_bbox_ori, pred_group_ori, prob_group_ori in itertools.zip_longest(images, face_bboxs, face_bboxs_ori, preds_group_ori, probs_group_ori):
             if (face_bbox == -1).all():
                 images_new.append(image.unsqueeze(dim=0))
             else:
@@ -1233,12 +1304,12 @@ class Trainer(GenericTrainer):
                 idx_top = min(face_bbox[3], face_bbox_ori[3], img_height)
 
                 img_face = image[:,idx_bottom:idx_top,idx_left:idx_right].clone()
-                if target==-1:
-                    grad_hook = make_grad_hook(factor)
-                elif target==pred_gender_ori:
-                    grad_hook = make_grad_hook(1)
-                elif target!=pred_gender_ori:
-                    grad_hook = make_grad_hook(factor)
+                # if target==-1:
+                #     grad_hook = make_grad_hook(factor)
+                # elif target==pred_gender_ori:
+                grad_hook = make_grad_hook(1)
+                # elif target!=pred_gender_ori:
+                #     grad_hook = make_grad_hook(factor)
                 img_face.register_hook(grad_hook)
 
                 img_add = torch.zeros_like(image)
@@ -1274,6 +1345,13 @@ class Trainer(GenericTrainer):
         print(f"\t{self.accelerator.device}; {state};\n\t\tparam[0]: {params[0].flatten()[0].item():.8f};\tparam[0].grad: {params[0].grad.flatten()[0].item():.8f}")
         
 
+def get_curation_set(args):
+    from mpr.preprocessing import identity_embedding
+    vision_encoder = networks.ModelFactory.get_model(modelname=args.vision_encoder, train=args.train)  
+    _, refer_loader = data_handler.DataloaderFactory.get_dataloader(dataname=args.refer_dataset, args=args)    
+    refer_embedding, _ = identity_embedding(args, vision_encoder, refer_loader, args.trainer_group, query=False)
+    print('refer_embedding:', refer_embedding.shape)
+    return refer_embedding
 
 def make_grad_hook(coef):
     return lambda x: coef * x

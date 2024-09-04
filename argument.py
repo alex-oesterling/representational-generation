@@ -8,6 +8,7 @@ def get_args():
 
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--n-workers', type=int, default=1)
+    parser.add_argument('--batch-size', type=int, default=256)
     
     # For coupmting MPR
     parser.add_argument('--refer-dataset', type=str, default='fairface', choices=['fairface', 'stable_bias_i'])
@@ -25,17 +26,16 @@ def get_args():
     parser.add_argument('--n-resampling', type=int, default=1000, help='bootstrapping')
     parser.add_argument('--resampling-size', default=1000, type=int, help='bootstrapping')
     parser.add_argument('--normalize', default=False, action='store_true', help='normalization for x')
+    parser.add_argument('--functionclass', type=str, default='linear', help='functionclass for mpr') # choices=['linear','dt','nn','l2'],    
     
     # For retrieving the dataset
     parser.add_argument('--retrieve', default=False, action='store_true', help='retrieve the dataset')
     parser.add_argument('--retriever', type=str, default='mapr', choices=['mapr', 'random','knn', 'random_ratio'])
-    parser.add_argument('--functionclass', type=str, default='linear', help='functionclass for mapr') # choices=['linear','dt','nn','l2'],
     parser.add_argument('--max-depth', type=int, default=2, help='max depth for decision tree')
     parser.add_argument('--ratio', type=float, default=1.0, help='ratio for random_ratio retriever')
     parser.add_argument('--pool-size', type=float, default=1.0)
     parser.add_argument('--refer-size', type=float, default=1.0)
     parser.add_argument('--k', type=int, default=20, help='the number of retrieved sample')
-
 
     # mapr hyperparameters
     parser.add_argument('--cutting_planes', type=int, default=50, help='the number of cutting planes in LP')

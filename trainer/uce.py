@@ -14,12 +14,12 @@ class Trainer(GenericTrainer):
     #                'laborer', 'construction worker', 'developer', 'carpenter','manager',
     #                  'lawyer', 'farmer', 'salesperson', 'physician', 'firefighter', 
     #                  'analyst', 'mechanic', 'sheriff', 'CEO', 'doctor', 'chef']
-    concepts = ["chef", "cook", "therapist", "housekeeper", "pilot", "flight attendant", "taxi driver", "nurse"]
+    concepts = ["CEO", "firefighter", "chef", "cook", "therapist", "housekeeper", "pilot", "flight attendant", "taxi driver", "nurse"]
     
     def __init__(self, **kwargs):
         super(Trainer, self).__init__(**kwargs)
 
-        self.group_type = self.args.group
+        self.group_type = self.args.trainer_group
 
         old_texts = []
         concepts_ = []
@@ -66,7 +66,7 @@ class Trainer(GenericTrainer):
         
         self.lamb = self.args.lamb
 
-    def train(self, add=False, layers_to_edit=None, erase_scale=1, preserve_scale = 0.1, with_to_k=True, num_images=10):
+    def train(self, add=False, layers_to_edit=None, erase_scale=1, preserve_scale = 0.1, with_to_k=True, num_images=10, accelerate=None):
         old_text_ = self.old_texts
         new_text_ = self.new_texts
         retain_text_ = self.retain_texts
