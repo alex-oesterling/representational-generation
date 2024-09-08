@@ -8,25 +8,22 @@ import random
 import itertools
 import pickle
 from tqdm import tqdm
-import clip
-import cv2
-import torchvision 
 
 group_dic = {
     'gender' : ['male', 'female'],
     'age' : ['young', 'old'],
-    'race' : ['East Asian', 'Indian', 'Black', 'White', 'Middle Eastern', 'Latino_Hispanic', 'Southeast Asian'],
+    'race' : ['East Asčian', 'Indian', 'Black', 'White', 'Middle Eastern', 'Latino_Hispanic', 'Southeast Asian'],
+    'race2' : ['White', 'Black', 'Hispanic', 'Asian'],
     'face' : ['Bald', 'Bangs', 'Black_Hair', 'Blond_Hair', 'Blurry', 'Double_Chin', 'Eyeglasses',
                 'Goatee', 'Gray_Hair', 'Heavy_Makeup', 'Mustache', 'No_Beard', 'Sideburns', 'Smiling', 'Wearing_Hat']
 }
 
-def getMPR(groups, dataset, k=0, curation_set=None, modelname=None, indices=None, normalize=False):
+def getMPR(groups, dataset, k=0, curation_set=None, statistics=None, modelname=None, indices=None, normalize=False):
     if indices is None:
         indices = np.ones(dataset.shape[0])
     k = int(np.sum(indices))
 
-    # groups = args.mpr_group
-
+    # preprocessing features for the case of boolean series
     if 'boolean' in modelname:
         try:
             depth = int(modelname[7:])
@@ -39,10 +36,12 @@ def getMPR(groups, dataset, k=0, curation_set=None, modelname=None, indices=None
                 dataset = np.concatenate((dataset, np.prod(dataset[:,idxs], axis=1).reshape(-1,1)), axis=1)
                 curation_set = np.concatenate((curation_set, np.prod(curation_set[:,idxs], axis=1).reshape(-1,1)), axis=1)
     
+    # normalizing the dataset, we don't need to normalize the curation set for decision tree
     if normalize and 'dt' not in modelname:
         dataset = dataset / np.linalg.norm(dataset, axis=-1, keepdims=True)
         curation_set = curation_set / np.linalg.norm(curation_set, axis=-1, keepdims=True)
 
+    #linear function & boolean series
     if 'dt' not in modelname:
         reg = oracle_function(indices, dataset, curation_set=curation_set, modelname=modelname)
         
@@ -57,6 +56,7 @@ def getMPR(groups, dataset, k=0, curation_set=None, modelname=None, indices=None
             # c *= np.sqrt(c.shape[0]) ## sqrt(n+m) = 141   
             # c *= np.sqrt(m*k/(m+k))
             mpr = np.abs(np.sum((indices/k)*c[:dataset.shape[0]]) - np.sum((1/m)*c[dataset.shape[0]:]))
+    # Decision tree
     else:
         group_list = []
         for group in groups:
@@ -92,7 +92,10 @@ def getMPR(groups, dataset, k=0, curation_set=None, modelname=None, indices=None
             # should we condition cases where male and female are selected at the same time?
             # dataset = np.concatenate((dataset, np.prod(dataset[:,idxs], axis=1).reshape(-1,1)), axis=1)
             p = _compute_intersectional_probabilities(dataset[:,idxs], depth)
-            q = _compute_intersectional_probabilities(curation_set[:,idxs], depth)
+            if statistics is not None:
+                q =  _marginalize(statistics, group_list[idxs])
+            else:
+                q = _compute_intersectional_probabilities(curation_set[:,idxs], depth)
             mpr = 0.5 * np.sum(np.abs(p - q))
             if max_mpr < mpr:
                 max_mpr = mpr
@@ -168,3 +171,10 @@ def _compute_intersectional_probabilities(dataset, depth):
     
     return probs
 
+def _marginalize(statistics, groups):
+    idxs_marginzalie = []
+    for idx, group in statistics['group']:
+        if group not in groups:
+            idxs_marginzalie.append(idx)
+    return statistics['prob'].sum(axis=idxs_marginzalie)
+    

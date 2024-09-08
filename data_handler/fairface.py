@@ -31,6 +31,8 @@ class FairFace(GenericDataset):
             df = pd.read_csv(self.dataset_path + "/fairface_label_val.csv")
 
         self.race_to_idx = {}
+        race = ['East Asian', 'Indian', 'Black', 'White', 'Middle Eastern', 'Latino_Hispanic', 'Southeast Asian'],
+        race2 = ['White', 'Black', 'Latino_Hispanic', 'Asian'],
         for i, race in enumerate(df.race.unique()):
             self.labeltags.append(race)
             self.race_to_idx[race] = i
@@ -64,10 +66,32 @@ class FairFace(GenericDataset):
             self.labels.append([gender_idx[i], age_idx[i]] + list(one_hot[i]))
 
         self.labels = torch.tensor(self.labels)
-
-        # construct_path = lambda x: os.path.join(self.dataset_path, x)
         self.img_paths = df.file.to_list()
-
+        
+        if (hasattr(self.args, 'mpr_group') and 'race2' in self.args.mpr_group) or \
+            (hasattr(self.args, 'trainer_group') and 'race2' in self.args.trainer_group):
+        
+            labels = torch.zeros((self.labels.shape[0], 6))
+            labels[:,:2] = self.labels[:,:2]
+            labels[:,2] = self.labels[:,5] # white
+            labels[:,3] = self.labels[:,4] # black
+            labels[:,4] = self.labels[:,7] # white
+            labels[:,5] = self.labels[:,2] + self.labels[:,3] + self.labels[:,6] + self.labels[:,8] # white
+            self.labels = labels
+            
+            # reduce Asian images
+            indices = torch.nonzero(self.labels[:, 5] == 1).squeeze()
+            indices = indices[torch.randperm(indices.size(0))]
+            num_indices_to_keep = indices.size(0) // 4
+            selected_indices = indices[:num_indices_to_keep]         
+            remained_indices = torch.nonzero(self.labels[:, 5] != 1).squeeze()
+            total_indices = torch.cat((selected_indices, remained_indices))
+            total_indices = total_indices[torch.argsort(total_indices)]
+            self.labels = self.labels[total_indices]
+            print('the number of total images:', len(self.img_paths))
+            print('the number of remained images:', len(self.labels))
+            self.img_paths = [self.img_paths[i] for i in total_indices]
+        # construct_path = lambda x: os.path.join(self.dataset_path, x)
 
     def __len__(self):
         return len(self.labels)

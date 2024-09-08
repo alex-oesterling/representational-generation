@@ -116,7 +116,6 @@ class Trainer(GenericTrainer):
         self.group_classifier_dic = {}
         vision_encoder = networks.ModelFactory.get_model(modelname=self.args.vision_encoder)  
         self.group_classifier_dic['vision_encoder'] = vision_encoder
-        print(f"weight dtype: {self.weight_dtype}")
         self.group_classifier_dic['vision_encoder'].to(self.accelerator.device, dtype=self.weight_dtype)
         self.group_classifier_dic['vision_encoder'].requires_grad_(False)
         self.group_classifier_dic['vision_encoder'].eval()
@@ -304,8 +303,6 @@ class Trainer(GenericTrainer):
         if self.args.allow_tf32:
             torch.backends.cuda.matmul.allow_tf32 = True
 
-        print("unet lora : ", unet_lora_layers)
-
         if self.args.train_text_encoder and self.args.train_unet:
             params_to_optimize = itertools.chain(unet_lora_layers.parameters(), text_encoder_lora_model.parameters())
         elif self.args.train_text_encoder and not self.args.train_unet:
@@ -475,6 +472,7 @@ class Trainer(GenericTrainer):
         self.wandb_tracker = self.accelerator.get_tracker("wandb", unwrap=True)
 
         curation_set = get_curation_set(self.args)
+        curation_set_tensor = torch.tensor(curation_set, dtype=self.weight_dtype, device=self.accelerator.device)
         mpr_set = None
         for epoch in range(first_epoch, self.args.num_train_epochs):
             #torch.zeros([len(train_dataloader_idxs[0])*self.args.mpr_num_batches, self.args.num_group_attributes], dtype=self.weight_dtype, device=self.accelerator.device)
@@ -575,10 +573,10 @@ class Trainer(GenericTrainer):
 
                     if self.accelerator.is_main_process:
                         probs_tmp = probs_group_all[(probs_group_all!=-1).all(dim=-1)]
-                        logs_i["mpr"] = getMPR(self.args.trainer_group, mpr_set, 
+                        logs_i["mpr"] = getMPR(self.args.trainer_group, mpr_set.cpu().numpy(), 
                                                curation_set=curation_set, 
                                                modelname=self.args.functionclass, 
-                                               normalize=self.args.normalize)
+                                               normalize=self.args.normalize)[0]
                         # gender_gap = (((probs_tmp[:,1]>=0.5)*(probs_tmp[:,1]<=1)).float().mean() - ((probs_tmp[:,1]>=0)*(probs_tmp[:,1]<=0.5)).float().mean()).item()
                         # gender_pred_between_02_08 = ((probs_tmp[:,1]>=0.2)*(probs_tmp[:,1]<=0.8)).float().mean().item()
                         # logs_i["gender_gap"].append(gender_gap)
@@ -640,7 +638,7 @@ class Trainer(GenericTrainer):
                 
                 ################################################
                 # Step 4: compute loss
-                # loss_fair_i = torch.ones(noises_i.shape, dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
+                loss_fair_i = torch.ones(noises_i.shape, dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
                 # loss_face_i = torch.ones(noises_i.shape, dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
                 loss_CLIP_i = torch.ones(noises_i.shape[0], dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
                 loss_DINO_i = torch.ones(noises_i.shape[0], dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
@@ -678,16 +676,16 @@ class Trainer(GenericTrainer):
                     # loss_fair_ij_w_face_loss = CE_loss(logits_gender_ij[idxs_w_face_loss], targets_ij[idxs_w_face_loss])
                     # loss_fair_ij[idxs_w_face_loss] = loss_fair_ij_w_face_loss
                     
-                    oracle_function = oracle_function(np.ones(self.args.mpr_num_batches*noises_i.shape[0]), mpr_set, curation_set, modelname='linear')
-                    oracle_function = torch.tensor(oracle_function, dtype=self.weight_dtype, device=self.accelerator.device) ##compute oracle over detached gradients precomputed
-                    mpr_set_with_gradients = mpr_set
-                    mpr_set_with_gradients[noises_i.shape[0]:][j*self.args.train_GPU_batch_size:(j+1)*self.args.train_GPU_batch_size] = probs_group_ij ## insert computation graph for attributes for batch i, device j
-                    expanded_dataset_with_gradients = torch.cat([mpr_set_with_gradients, curation_set], dim=0)
-                    c = torch.dot(expanded_dataset_with_gradients, oracle_function)
+                    oracle_function_ = oracle_function(np.ones(mpr_set.shape[0]), mpr_set.cpu().numpy(), curation_set, modelname='linear')
+                    oracle_function_ = torch.tensor(oracle_function_, dtype=self.weight_dtype, device=self.accelerator.device) ##compute oracle over detached gradients precomputed
+                    mpr_set_with_gradients = deepcopy(mpr_set)
+                    mpr_set_with_gradients[-noises_i.shape[0]:][j*self.args.train_GPU_batch_size:(j+1)*self.args.train_GPU_batch_size] = probs_group_ij ## insert computation graph for attributes for batch i, device j
+                    expanded_dataset_with_gradients = torch.cat([mpr_set_with_gradients, curation_set_tensor], dim=0)
+                    c = expanded_dataset_with_gradients @ oracle_function_.unsqueeze(-1)
 
                     k = self.args.mpr_num_batches*noises_i.shape[0]
                     m = curation_set.shape[0]
-                    loss_mpr_ij = torch.abs(torch.sum((1/k)*c[:mpr_set.shape[0]]) - torch.sum((1/m)*c[mpr_set.shape[0]:]))
+                    loss_fair_ij = torch.abs(torch.sum((1/k)*c[:mpr_set.shape[0]]) - torch.sum((1/m)*c[mpr_set.shape[0]:]))
 
                     # loss_fair_ij = torch.ones(len(idxs_ij), dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
                     # idxs_w_face_loss = ((face_indicators_ij == True) * (targets_ij != -1)).nonzero().view([-1])
@@ -711,12 +709,12 @@ class Trainer(GenericTrainer):
 
                     # dynamic_weights = self.gen_dynamic_weights(face_indicators_ij, targets_ij, preds_gender_ori_ij, probs_gender_ori_ij, factor=self.args.factor1)
                     # loss_ij = loss_mpr_ij + self.args.weight_loss_img * dynamic_weights * (loss_CLIP_ij + loss_DINO_ij) + self.args.weight_loss_face * loss_face_ij
-                    loss_ij = loss_mpr_ij + self.args.weight_loss_img * (loss_CLIP_ij + loss_DINO_ij) 
+                    loss_ij = loss_fair_ij + self.args.weight_loss_img * (loss_CLIP_ij + loss_DINO_ij) 
                     self.accelerator.backward(loss_ij.mean())
 
                     with torch.no_grad():
                         # loss_fair_i[idxs_ij] = loss_fair_ij.to(loss_fair_i.dtype)
-                        loss_i[idxs_ij] = loss_ij.to(loss_i.dtype)
+                        loss_fair_i[idxs_ij] = loss_fair_ij.to(loss_fair_i.dtype)
                         # loss_face_i[idxs_ij] = loss_face_ij.to(loss_face_i.dtype)
                         loss_CLIP_i[idxs_ij] = loss_CLIP_ij.to(loss_CLIP_i.dtype)
                         loss_DINO_i[idxs_ij] = loss_DINO_ij.to(loss_DINO_i.dtype)
@@ -724,28 +722,27 @@ class Trainer(GenericTrainer):
                         
                 # for logging purpose, gather all losses to main_process
                 self.accelerator.wait_for_everyone()
-                # loss_fair_all = customized_all_gather(loss_fair_i, self.accelerator)
+                loss_fair_all = customized_all_gather(loss_fair_i, self.accelerator)
                 # loss_face_all = customized_all_gather(loss_face_i, self.accelerator)
-                loss_all = customized_all_gather(loss_i, self.accelerator)
                 loss_CLIP_all = customized_all_gather(loss_CLIP_i, self.accelerator)
                 loss_DINO_all = customized_all_gather(loss_DINO_i, self.accelerator)
                 loss_all = customized_all_gather(loss_i, self.accelerator)
 
-                loss_all = loss_all[loss_fair_all!=-1]
-                loss_fair_all = loss_fair_all[loss_fair_all!=-1]
-                loss_face_all = loss_face_all[loss_face_all!=-1]
+                # loss_all = loss_all[loss_all!=-1]
+                # loss_fair_all = loss_fair_all[loss_fair_all!=-1]
+                # loss_face_all = loss_face_all[loss_face_all!=-1]
 
                 if self.accelerator.is_main_process:
                     # logs_i["loss_fair"].append(loss_fair_all)
                     # logs_i["loss_face"].append(loss_face_all)
-                    loss_i["loss_MPR"].append(loss_all)
+                    logs_i["loss_fair"].append(loss_fair_all)
                     logs_i["loss_CLIP"].append(loss_CLIP_all)
                     logs_i["loss_DINO"].append(loss_DINO_all)
                     logs_i["loss"].append(loss_all)
                 
                 # process logs
                 if self.accelerator.is_main_process:
-                    for key in ["loss_fair", "loss_face", "loss_CLIP", "loss_DINO", "loss"]:
+                    for key in ["loss_fair", "loss_CLIP", "loss_DINO", "loss"]:#wandb_tracker.log({f"train_{key}"
                         if logs_i[key] == []:
                             logs_i.pop(key)
                         else:
@@ -775,7 +772,7 @@ class Trainer(GenericTrainer):
                 if self.args.train_text_encoder:
                     self.model_sanity_print(text_encoder_lora_model, "check No.1, text_encoder: after self.accelerator.backward()")
                 if self.args.train_unet:
-                    self.model_sanity_print(unet_lora_layers, "check No.1, unet: after self.accelerator.backward()")
+                    self.model_sanity_print(self.unet_lora_layers, "check No.1, unet: after self.accelerator.backward()")
 
                 # note that up till now grads are not synced
                 # we mannually sync grads
@@ -789,7 +786,7 @@ class Trainer(GenericTrainer):
                             torch.distributed.all_reduce(p.grad, torch.distributed.ReduceOp.SUM)
                             p.grad = p.grad / self.accelerator.num_processes / N_backward
                     if self.args.train_unet:
-                        for p in unet_lora_layers.parameters():
+                        for p in self.unet_lora_layers:
                             if not torch.isfinite(p.grad).all():
                                 grad_is_finite = False
                             torch.distributed.all_reduce(p.grad, torch.distributed.ReduceOp.SUM)
@@ -798,7 +795,7 @@ class Trainer(GenericTrainer):
                 if self.args.train_text_encoder:
                     self.model_sanity_print(text_encoder_lora_model, "check No.2, text_encoder: after gradients allreduce & average")
                 if self.args.train_unet:
-                    self.model_sanity_print(unet_lora_layers, "check No.2, unet: after gradients allreduce & average")
+                    self.model_sanity_print(self.unet_lora_layers, "check No.2, unet: after gradients allreduce & average")
 
                 if grad_is_finite:
                     optimizer.step()
@@ -1260,10 +1257,14 @@ class Trainer(GenericTrainer):
             for group in groups:
                 if group == 'face':
                     continue
-                
+
                 clf = self.group_classifier_dic[group]
                 logits = clf(embeddings)
-                probs = torch.softmax(logits, dim=-1)
+                if logits.shape[-1] == 1:
+                    probs = torch.sigmoid(logits)
+                    probs = torch.cat([1-probs, probs], dim=-1)
+                else:
+                    probs = torch.softmax(logits, dim=-1)
                 probs_group.append(probs)
                 temp = probs.max(dim=-1)
                 preds = temp.indices
@@ -1286,7 +1287,7 @@ class Trainer(GenericTrainer):
                 ) * (fill_value)
             preds_group_new[selector] = preds_group
 
-        return preds_group_new, probs_group_new
+        return preds_group_new.to(self.weight_dtype), probs_group_new.to(self.weight_dtype)
 
     def apply_grad_hook_face(self, images, face_bboxs, face_bboxs_ori, preds_group_ori, probs_group_ori, factor=0.1):
         """apply gradient hook on non-face regions of the generated images
@@ -1341,7 +1342,7 @@ class Trainer(GenericTrainer):
         return weights
 
     def model_sanity_print(self, model, state):
-        params = [p for p in model.parameters()]
+        params = [p for p in model]
         print(f"\t{self.accelerator.device}; {state};\n\t\tparam[0]: {params[0].flatten()[0].item():.8f};\tparam[0].grad: {params[0].grad.flatten()[0].item():.8f}")
         
 

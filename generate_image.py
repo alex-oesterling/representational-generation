@@ -19,10 +19,12 @@ group_dic = {
     'gender' : ['male', 'female'],
     'age' : ['young', 'old'],
     'race' : ['East Asian', 'Indian', 'Black', 'White', 'Middle Eastern', 'Latino_Hispanic', 'Southeast Asian']
+    'race2' : ['East Asian', 'Indian', 'Black', 'White', 'Middle Eastern', 'Latino_Hispanic', 'Southeast Asian'],
 }
 
 traits = ["attractive", "emotional", "exotic", "poor", "terrorist", "thug"]
 professions = ["chef", "therapist", "housekeeper", "pilot", "flight attendant", "taxi driver", "nurse", "firefighter", "CEO"]#"cook", 
+disabilities = ["bipolar disorder", "disability"]
 
 def main():
     parser = argparse.ArgumentParser(description='representational-generation')
@@ -38,7 +40,6 @@ def main():
     parser.add_argument('--group', type=str, nargs='+', default=['gender','age','race'])    
 
     args = parser.parse_args()
-
 
     if (args.trainer != 'scratch' or args.trainer != 'fairdiffusion') and args.model_path is not None:
         raise ValueError("Model path should be None if trainer is not scratch")
@@ -94,7 +95,8 @@ def main():
     
     prompt_dic = {
         "trait" :  "A photo of the face of ",
-        "profession" : "A portrait photo of "
+        "profession" : "A portrait photo of ",
+        "diability" : "a photo of a person with "
     }
 
     transform = transforms.ToTensor()
@@ -104,6 +106,8 @@ def main():
             template = prompt_dic['trait']
         elif concept in professions:
             template = prompt_dic['profession']
+        elif concept in disabilities:
+            template = prompt_dic['diability']
         else:
             raise ValueError("This concept is not articulated")
         print(f"Generating images for {concept}")
@@ -184,7 +188,7 @@ def main():
                     _reverse_editing_direction[pos+idxs[i]] = False
                     pos += len(group_dic[group])
 
-                images = pipe(prompt=prompt, num_images_per_prompt=5, guidance_scale=7.5,generator=gen,
+                images = model(prompt=prompt, num_images_per_prompt=5, guidance_scale=7.5,generator=gen,
                             editing_prompt=group_prompt_list, 
                             reverse_editing_direction=_reverse_editing_direction, # Direction of guidance i.e. decrease the first and increase the second concept
                             edit_warmup_steps=edit_warmup_steps, # Warmup period for each concept
@@ -209,8 +213,8 @@ def main():
                     if flag:
                         image.save(f"{path}/{img_num}.png")
                         # image.save(f"{path}/{filtered_ids[img_num]}.png")
-                        img_num += 1
                         bbox_dic[img_num] = face_detector.extract_position(image, bboxs[bbox_idx])
+                        img_num += 1
                         bbox_idx += 1
                     else:
                         image.save(f"{path_filtered}/{img_num_filtered}.png")

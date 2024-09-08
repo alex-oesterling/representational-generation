@@ -169,6 +169,15 @@ class LoggerBuffer():
             screen_msg = ', '.join(screen_msg)
             self.logger.info(screen_msg)
 
+def get_statistics(concept, groups):
+    path = './datasets/mpr_stuffs/statistics'
+    if groups == ['wheelchair', 'race2']:
+        group_name = 'wheelchair_race'
+    filename = f'{concept}_{group_name}.pkl'
+    with open(os.path.join(path, filename), 'rb') as f:
+        statistics = pickle.load(f)
+    return statistics
+
 
 def make_result_path(args):
     # filename = f'{args.query_dataset}_{args.refer_dataset}_{args.vision_encoder}_{args.target_model}_{args.functionclass}'

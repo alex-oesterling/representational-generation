@@ -4,7 +4,7 @@ import torch
 def get_args():
     parser = argparse.ArgumentParser(description='representational-generation')
 
-    parser.add_argument('--train', default=False, action='store_false', help='train the model')
+    parser.add_argument('--train', default=False, action='store_true', help='train the model')
 
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--n-workers', type=int, default=1)

@@ -14,12 +14,15 @@ os.environ["WANDB_MODE"]="offline"
 import data_handler
 import networks
 import retriever
-from utils import set_seed, make_result_path,  compute_similarity, check_log_dir, print_intersectional_probs
+from utils import set_seed, make_result_path,  compute_similarity, get_statistics
 from mpr.mpr import getMPR
 from mpr.preprocessing import identity_embedding
 
 def main(args):
-    refer_loader = data_handler.DataloaderFactory.get_dataloader(dataname=args.refer_dataset, args=args)
+    if args.refer_dataset != 'statistics':
+        refer_loader = data_handler.DataloaderFactory.get_dataloader(dataname=args.refer_dataset, args=args)
+    else:
+        statistics = get_statistics(args.target_concept, args.mpr_group)
     query_loader = data_handler.DataloaderFactory.get_dataloader(dataname=args.query_dataset, args=args)
 
     ## Compute MPR
@@ -28,7 +31,8 @@ def main(args):
 
     ## Make embedding vectors
     print('extract embeddings from the reference distribution')
-    refer_embedding, _ = identity_embedding(args, vision_encoder, refer_loader,args.mpr_group, query=False)
+    if args.refer_dataset != 'statistics':
+        refer_embedding, _ = identity_embedding(args, vision_encoder, refer_loader,args.mpr_group, query=False)
     print('extract embeddings from the query distribution')
     query_embedding, feature_dic = identity_embedding(args, vision_encoder, query_loader, args.mpr_group, query=True)
 
@@ -60,20 +64,22 @@ def main(args):
         print('Pool size is reduced to ', args.pool_size)
 
         query_embedding = query_embedding[idx]
-        query_embedding = query_embedding[idx]
     else:
         idx = np.arange(query_embedding.shape[0])
 
     s = compute_similarity(feature_dic['normal'], args.target_concept, vision_encoder, args.vision_encoder)        
     
     for j in range(args.n_resampling):
-        refer_embedding_split = refer_embedding
+        refer_embedding_split = refer_embedding if args.refer_dataset != 'statistics' else None
+        
+        # sample with replacement in the pool
         if args.bootstrapping:
             n_samples = query_embedding.shape[0] 
             resampling_idx = np.random.choice(n_samples, n_samples, replace=True)
             query_embedding_split = query_embedding[resampling_idx]
-            
             s_split = s[resampling_idx]
+
+        # sample without replacement
         elif args.n_resampling > 1:
             split_idx = np.arange(j*args.resampling_size, (j+1)*args.resampling_size)
             query_embedding_split = query_embedding[split_idx]
@@ -81,6 +87,8 @@ def main(args):
             s_split = s[split_idx]
 
             if args.refer_size != 1:
+                if refer_loader == 'statistics':
+                    raise ValueError('statistics cannot be resampled')
                 n_samples = int(refer_embedding.shape[0]*args.refer_size) if args.refer_size < 1 else int(args.refer_size)
                 split_idx = np.arange(j*n_samples, (j+1)*n_samples)
                 refer_embedding_split = refer_embedding[split_idx]
@@ -103,7 +111,10 @@ def main(args):
             
         else:
             score = np.sum(s_split)
-            MPR, c = getMPR(args.mpr_group, query_embedding_split, curation_set=refer_embedding_split, modelname=args.functionclass, normalize=args.normalize)
+            if refer_loader == 'statistics':
+                MPR, c = getMPR(args.mpr_group, query_embedding_split, curation_set=None, statistics=statistics, modelname=args.functionclass, normalize=args.normalize)
+            else:
+                MPR, c = getMPR(args.mpr_group, query_embedding_split, curation_set=refer_embedding_split, modelname=args.functionclass, normalize=args.normalize)
             print(f'Concept: {args.target_concept}, final MPR: {MPR}, score: {score}')
         MPR_dic.append(MPR)
         score_dic.append(score)
@@ -129,6 +140,7 @@ def main(args):
         
     with open(os.path.join(log_path,filename+'.pkl'), 'wb') as f:
         pickle.dump(results, f)
+    print('Results are saved at ', os.path.join(log_path,filename+'.pkl'))
     # with open(os.path.join(log_path,filename+'_MPR.pkl'), 'wb') as f:
     #     pickle.dump(MPR_dic, f)
     # with open(os.path.join(log_path,filename+'_score.pkl'), 'wb') as f:

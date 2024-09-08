@@ -2,16 +2,12 @@
 import torch
 import numpy as np 
 import os
-from sklearn.linear_model import LinearRegression
-from sklearn.ensemble import RandomForestRegressor
 from transformers import BlipProcessor
-import random 
-import itertools
 import pickle
 from tqdm import tqdm
-import clip
-import cv2
-import torchvision 
+import torch
+import torch.nn as nn
+from lavis.models import load_model_and_preprocess
 
 class CLIPExtractor:
     def __init__(self, encoder, args):
@@ -24,6 +20,24 @@ class CLIPExtractor:
         with torch.no_grad():
             outputs = self.encoder.encode_image(images)
         return outputs
+
+class Blip2Model(nn.Module):
+    def __init__(self):
+        super(Blip2Model, self).__init__()
+
+        self.model, self.vis_processors, _ = load_model_and_preprocess(name="blip2_t5",
+                                                            model_type="pretrain_flant5xxl",
+                                                            is_eval=True, device='cuda')
+        
+    def forward(self, q: str, image_input) -> list:
+        question = f"Question: {q} Answer:"
+
+        images = [ self.vis_processors["eval"](im) for im in image_input ]
+
+        images = torch.stack(images).to('cuda')
+        answer = self.model.generate({"image": images, "prompt": [question] * len(images)})
+        
+        return [ a.lower() for a in answer ]    
     
 def identity_embedding(args, encoder, dataloader, groups, query=True):
     dataset_name = args.refer_dataset if not query else args.query_dataset
@@ -123,6 +137,19 @@ def group_estimation(features, group='gender', vision_encoder_name='CLIP', oneho
                 print(f'{attr} 1/0: {np.sum(one_hot_indices)}/{len(one_hot_indices)-np.sum(one_hot_indices)}')
             estimated_group_list.append(estimated_group)
         estimated_group = np.concatenate(estimated_group_list, axis=1)
+    elif group == 'wheelchair':
+        model = Blip2Model()
+        model = model.to('cuda')
+        model.eval()
+        output: dict = { }
+
+        with torch.no_grad():
+            item_presence = [ ]
+            question = f"Is there a wheelchair in an image?"
+            for data in loader:
+                images, labels, idxs = data
+                result: str = model(question, images)[0]
+                item_presence.append(result)
 
     # elif g == 'skintone':
     #     from skintone_esti import FanCrop
