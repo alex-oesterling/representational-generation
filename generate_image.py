@@ -18,12 +18,12 @@ group_idx ={
 group_dic = {
     'gender' : ['male', 'female'],
     'age' : ['young', 'old'],
-    'race' : ['East Asian', 'Indian', 'Black', 'White', 'Middle Eastern', 'Latino_Hispanic', 'Southeast Asian']
+    'race' : ['East Asian', 'Indian', 'Black', 'White', 'Middle Eastern', 'Latino_Hispanic', 'Southeast Asian'],
     'race2' : ['East Asian', 'Indian', 'Black', 'White', 'Middle Eastern', 'Latino_Hispanic', 'Southeast Asian'],
 }
 
 traits = ["attractive", "emotional", "exotic", "poor", "terrorist", "thug"]
-professions = ["chef", "therapist", "housekeeper", "pilot", "flight attendant", "taxi driver", "nurse", "firefighter", "CEO"]#"cook", 
+professions = ["chef", "therapist", "housekeeper", "pilot", "flight attendant", "taxi driver", "nurse", "firefighter", "CEO", "computer engineer", "computer engineer for the ENIAC"]#"cook", 
 disabilities = ["bipolar disorder", "disability"]
 
 def main():
@@ -41,8 +41,8 @@ def main():
 
     args = parser.parse_args()
 
-    if (args.trainer != 'scratch' or args.trainer != 'fairdiffusion') and args.model_path is not None:
-        raise ValueError("Model path should be None if trainer is not scratch")
+    if args.trainer not in ['scratch',  'fairdiffusion'] and args.model_path is None:
+        raise ValueError("Model path should not be None if trainer is not scratch or fairdiffusion")
 
     set_seed(args.seed)
 
@@ -56,7 +56,6 @@ def main():
             name = "CompVis/stable-diffusion-v1-5"
         elif args.model == 'SD_2':
             name = "CompVis/stable-diffusion-v2-1"
-        print(name)
         model = SemanticEditPipeline.from_pretrained(
         # "runwayml/stable-diffusion-v1-5",
         name,
@@ -83,11 +82,9 @@ def main():
         file.close()
 
     base_path = f'/n/holyscratch01/calmon_lab/Lab/datasets/{args.trainer}'
-    if args.model_path is not None:
-        group_name = args.model_path.split("_")[-1].split(".")[0]
-        base_path = os.path.join(base_path, group_name)
-    elif args.trainer == 'fairdiffusion':
+    if args.trainer != 'scratch':
         group_name = "".join([g[0].upper() for g in args.group])
+        # group_name = args.group[0]
         base_path = os.path.join(base_path, group_name)
 
     base_path = os.path.join(base_path, args.model)
@@ -127,13 +124,16 @@ def main():
             template += " person"
 
         # for fairdiffusion
-        if args.trainer == 'fairdfiffusion':
+        if args.trainer == 'fairdiffusion':
             # get group ratio
             group_ratio = np.load('group_ratio.npy')
             marginalize_idx = [group_idx[group] for group in group_idx.keys() if group not in args.group]
             group_ratio = group_ratio.sum(axis=tuple(marginalize_idx))
             group_prob = group_ratio / group_ratio.sum()
-            print('group ratio : ', group_ratio)
+            # temporary fix
+            # group_prob[0] = 0.5
+            # group_prob[1] = 0.5
+            print('group ratio : ', group_prob)
 
             # make prompt list
             group_prompt_list = []
@@ -174,7 +174,7 @@ def main():
             else:
                 prompt = template + f"{prefix} {concept}"
 
-            if args.trainer != 'fairdfiffusion':
+            if args.trainer != 'fairdiffusion':
                 images = model(prompt=prompt, num_images_per_prompt=args.n_gen_per_iter, generator=gen).images
             else:
                 #make reverse_editing_direction
@@ -187,7 +187,6 @@ def main():
                 for i, group in enumerate(args.group):
                     _reverse_editing_direction[pos+idxs[i]] = False
                     pos += len(group_dic[group])
-
                 images = model(prompt=prompt, num_images_per_prompt=5, guidance_scale=7.5,generator=gen,
                             editing_prompt=group_prompt_list, 
                             reverse_editing_direction=_reverse_editing_direction, # Direction of guidance i.e. decrease the first and increase the second concept

@@ -22,7 +22,7 @@ class FaceDetector:
         # self.app.prepare(ctx_id=0, det_size=(640, 640))
 
         # self.app = dlib.get_frontal_face_detector()
-        self.app = dlib.cnn_face_detection_model_v1('stuffs/dlib_models/mmod_human_face_detector.dat')
+        self.app = dlib.cnn_face_detection_model_v1('datasets/stuffs/dlib_models/mmod_human_face_detector.dat')
 
     
     def process_tensor_image(self, images, fill_value=-1):
@@ -122,6 +122,10 @@ if __name__ == "__main__":
     bbox_dic = {}
     for image, label, idxs in loader:
         flags, bboxs = face_detector.process_tensor_image(image)
+        if args.filter_w_aesthetic:
+            with torch.no_grad():
+                image_features = model2.encode_image(image)
+
         filtered_ids.extend(idxs[~flags].tolist())
         unfiltered_ids.extend(idxs[flags].tolist())
         for idx, bbox in zip(idxs[flags], bboxs):

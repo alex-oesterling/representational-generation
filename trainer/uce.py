@@ -14,7 +14,8 @@ class Trainer(GenericTrainer):
     #                'laborer', 'construction worker', 'developer', 'carpenter','manager',
     #                  'lawyer', 'farmer', 'salesperson', 'physician', 'firefighter', 
     #                  'analyst', 'mechanic', 'sheriff', 'CEO', 'doctor', 'chef']
-    concepts = ["CEO", "firefighter", "chef", "cook", "therapist", "housekeeper", "pilot", "flight attendant", "taxi driver", "nurse"]
+    # concepts = ["CEO", "firefighter", "chef", "cook", "therapist", "housekeeper", "pilot", "flight attendant", "taxi driver", "nurse"]
+    concepts = ["computer programmer"]#, "computer programmer for the ENIAC”"]
     
     def __init__(self, **kwargs):
         super(Trainer, self).__init__(**kwargs)
@@ -63,6 +64,8 @@ class Trainer(GenericTrainer):
             group_ratio = group_ratio.swapaxes(0,1)
         self.group_prob = torch.tensor(group_ratio / group_ratio.sum())
         self.group_prob = self.group_prob.flatten()
+        self.group_prob[0] = 0.5
+        self.group_prob[1] = 0.5
         
         self.lamb = self.args.lamb
 

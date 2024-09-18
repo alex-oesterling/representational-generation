@@ -13,9 +13,10 @@ group_dic = {
     'gender' : ['male', 'female'],
     'age' : ['young', 'old'],
     'race' : ['East Asčian', 'Indian', 'Black', 'White', 'Middle Eastern', 'Latino_Hispanic', 'Southeast Asian'],
-    'race2' : ['White', 'Black', 'Hispanic', 'Asian'],
+    'race2' : ['White', 'Black', 'Latino_Hispanic', 'Asian'],
     'face' : ['Bald', 'Bangs', 'Black_Hair', 'Blond_Hair', 'Blurry', 'Double_Chin', 'Eyeglasses',
-                'Goatee', 'Gray_Hair', 'Heavy_Makeup', 'Mustache', 'No_Beard', 'Sideburns', 'Smiling', 'Wearing_Hat']
+                'Goatee', 'Gray_Hair', 'Heavy_Makeup', 'Mustache', 'No_Beard', 'Sideburns', 'Smiling', 'Wearing_Hat'],
+    'wheelchair' : ['not wheelchair', 'wheelchair'],
 }
 
 def getMPR(groups, dataset, k=0, curation_set=None, statistics=None, modelname=None, indices=None, normalize=False):
@@ -106,11 +107,15 @@ def getMPR(groups, dataset, k=0, curation_set=None, statistics=None, modelname=N
                 
                 for i, (prob_p, prob_q) in enumerate(zip(p, q)):
                     subgroup_name = [group_list[idxs][k] if j == 1 else 'non ' + group_list[idxs][k] for k, j in enumerate(binary_vectors[i])]
+                    for i, name in enumerate(subgroup_name):
+                        if name == 'non not wheelchair':
+                            subgroup_name[i] = 'wheelchair'
                     if prob_p > prob_q or prob_p == prob_q:
                         subgroup_info['pos'].append(subgroup_name)
                     elif prob_q > prob_p:
                         subgroup_info['neg'].append(subgroup_name)
                 print(subgroup_info)
+                print(p, q)
         mpr = max_mpr
 
         reg = {'subgroup_info' : subgroup_info, 'max_mpr' : max_mpr, 'max_idxs' : max_idxs}
@@ -151,8 +156,6 @@ def oracle_function(indices, dataset, curation_set=None, modelname='linear'):
     #     reg = model.fit(dataset, alpha)
     # return reg
 
-
-
 def _compute_intersectional_probabilities(dataset, depth):
     # Combine dataset and curation_set
     probs = np.zeros(2**depth)
@@ -173,8 +176,8 @@ def _compute_intersectional_probabilities(dataset, depth):
 
 def _marginalize(statistics, groups):
     idxs_marginzalie = []
-    for idx, group in statistics['group']:
+    for idx, group in enumerate(statistics['group']):
         if group not in groups:
             idxs_marginzalie.append(idx)
-    return statistics['prob'].sum(axis=idxs_marginzalie)
+    return statistics['prob'].sum(axis=idxs_marginzalie).flatten().numpy()
     

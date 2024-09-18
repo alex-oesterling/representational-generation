@@ -11,7 +11,7 @@ def get_args():
     parser.add_argument('--batch-size', type=int, default=256)
     
     # For coupmting MPR
-    parser.add_argument('--refer-dataset', type=str, default='fairface', choices=['fairface', 'stable_bias_i'])
+    parser.add_argument('--refer-dataset', type=str, default='fairface', choices=['fairface', 'stable_bias_i','statistics'])
     parser.add_argument('--query-dataset', type=str, default='CLIP')
     parser.add_argument('--dataset-path', type=str, default=None, help='it is only used when query-dataset is general')
     parser.add_argument('--p-ver', type=str, default='v1', help='version of prompts used for generating')

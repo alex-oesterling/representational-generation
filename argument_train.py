@@ -9,6 +9,7 @@ def get_args():
     parser.add_argument('--target-model', type=str, default='SD_14') #required=True, 
     parser.add_argument('--refer-dataset', type=str, default='fairface', choices=['fairface', 'stable_bias_i'])
     parser.add_argument('--mpr-onehot', default=False, action='store_true', help='onehot group estimation')
+    parser.add_argument('--functionclass', type=str, default='linear', help='functionclass for mpr')
     
     # Hyperparameters for training
     parser.add_argument('--train', default=True, action='store_false', help='train the model')
@@ -33,7 +34,7 @@ def get_args():
 
     # for finetuning
     parser.add_argument('--normalize', default=False, action='store_true', help='normalization for x')
-    parser.add_argument('--functionclass', type=str, default='linear', help='functionclass for mapr') # choices=['linear','dt','nn','l2'],
+    
     parser.add_argument('--mpr_num_batches', type=int, default=4, help='the number of batches for computing MPRs')
     parser.add_argument('--vision-encoder', type=str, default='CLIP',choices = ['BLIP', 'CLIP', 'PATHS'])
     parser.add_argument(
@@ -184,7 +185,7 @@ def get_args():
             "These images are used to measure bias."
         ),
         type=int, 
-        default=8
+        default=100
         )
     parser.add_argument(
         '--val_GPU_batch_size', 

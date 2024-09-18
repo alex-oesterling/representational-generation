@@ -9,7 +9,7 @@ import wandb
 
 import sys
 import os
-os.environ["WANDB_MODE"]="offline"
+# os.environ["WANDB_MODE"]="offline"
 
 import data_handler
 import networks
@@ -87,7 +87,7 @@ def main(args):
             s_split = s[split_idx]
 
             if args.refer_size != 1:
-                if refer_loader == 'statistics':
+                if args.refer_dataset == 'statistics':
                     raise ValueError('statistics cannot be resampled')
                 n_samples = int(refer_embedding.shape[0]*args.refer_size) if args.refer_size < 1 else int(args.refer_size)
                 split_idx = np.arange(j*n_samples, (j+1)*n_samples)
@@ -111,7 +111,7 @@ def main(args):
             
         else:
             score = np.sum(s_split)
-            if refer_loader == 'statistics':
+            if args.refer_dataset == 'statistics':
                 MPR, c = getMPR(args.mpr_group, query_embedding_split, curation_set=None, statistics=statistics, modelname=args.functionclass, normalize=args.normalize)
             else:
                 MPR, c = getMPR(args.mpr_group, query_embedding_split, curation_set=refer_embedding_split, modelname=args.functionclass, normalize=args.normalize)

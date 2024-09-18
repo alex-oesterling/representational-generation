@@ -26,11 +26,16 @@ class General(GenericDataset):
 
         # sort the filenames
         self.filenames = os.listdir(self.dataset_path)
-        self.filenames = [f for f in self.filenames if f.endswith('.png')]
+        self.filenames = [f for f in self.filenames if f.endswith('.png') or f.endswith('.jpg')]
         self.filenames = np.array(self.filenames)
-        filenames_id = [int(f.split('.')[0]) for f in self.filenames]
-        filenames_id = np.argsort(filenames_id)
+        if 'openimages' not in self.dataset_path:
+            filenames_id = [int(f.split('.')[0]) for f in self.filenames]
+            filenames_id = np.argsort(filenames_id)
+        else:
+            filenames_id = [f.split('.')[0] for f in self.filenames]
+            filenames_id = np.argsort(filenames_id)
         self.filenames = self.filenames[filenames_id]
+        print(self.filenames)
 
         # self.concept_set = [self.args.target_concept]
         print('The number of generated samples : ', len(self.filenames))
@@ -41,19 +46,18 @@ class General(GenericDataset):
     def __getitem__(self, idx):
         filename = self.filenames[idx]
         imagepath = os.path.join(self.dataset_path, filename)
-        image = Image.open(imagepath).convert("RGB")
+        image_ori = Image.open(imagepath).convert("RGB")
 
         if self.face_detect:
             left, top, right, bottom = self.bbox_dic[idx]
-            image = image.crop((left, top, right, bottom))
+            image_ori = image_ori.crop((left, top, right, bottom))
 
         if self.transform is not None:
-            image = self.transform(image)
+            image = self.transform(image_ori)
             
         if self.processor is not None:
-            image = self.processor(images=image, return_tensors="pt")
+            image = self.processor(images=image_ori, return_tensors="pt")
             image = image['pixel_values'][0]
-            
         return image, 0, idx
 
     # def check_path_validation(self):

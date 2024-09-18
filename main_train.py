@@ -37,8 +37,8 @@ import utils
 def main(args):
     dm = networks.ModelFactory.get_model(modelname=args.target_model, train=args.train)
     _trainer = trainer.TrainerFactory.get_trainer(trainername=args.trainer, model=dm, args=args)    
-    
-    if args.trainer == 'finetuning':
+
+    if args.trainer in ['finetuning', 'rag']:
         logger = get_logger(__name__)
         logging_dir = Path(args.output_dir, args.logging_dir)
 
