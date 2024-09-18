@@ -8,7 +8,9 @@ dataset_dict = {'stable_bias_i' : ['data_handler.stable_bias','StableBiasIdentit
                 'stable_bias_large' : ['data_handler.stable_bias_large','StableBiasProfession'],
                 'fairface' : ['data_handler.fairface','FairFace'],
                 'general' : ['data_handler.general','General'],
-                'celeba' : ['data_handler.celeba','CelebA']
+                'celeba' : ['data_handler.celeba','CelebA'],
+                'openface': ['data_handler.openface','OpenFace'],
+                'custom': ['data_handler.custom_dataset','CustomDataset'],
                 # 'fairdiffusion' : ['data_handler.general','General'],
                 # 'fairdiffusion_gender' : ['data_handler.general','General']
                }

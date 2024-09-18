@@ -234,6 +234,21 @@ def compute_similarity(visual_features, target_concept, vision_encoder, vision_e
         similarity = visual_features @ text_embedding
     return similarity
 
+def get_concept_embedding(vision_encoder, target_concept, vision_encoder_name='clip'):
+    """
+    function that embeds a text query. Alex wrote this to allow us to query the reference dataset in eval_contextual.py
+    """
+    if vision_encoder_name != 'CLIP':
+        raise ValueError('Only CLIP is supported for now')
+    with torch.no_grad():        
+        prompt = f'photo portrait of {target_concept}'
+        text = clip.tokenize(prompt)
+        if torch.cuda.is_available():
+            text = text.cuda()
+        text_embedding = vision_encoder.encode_text(text).float()
+        text_embedding = text_embedding.cpu().numpy().squeeze()
+        text_embedding = text_embedding / np.linalg.norm(text_embedding)
+    return text_embedding
 # for PBM
 def fon(l):
     try:
