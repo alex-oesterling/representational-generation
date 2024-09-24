@@ -11,13 +11,11 @@ from warnings import filterwarnings
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0"    # choose GPU if you are on a multi GPU server
 import numpy as np
 import torch
-import pytorch_lightning as pl
 import torch.nn as nn
 from torchvision import datasets, transforms
 import tqdm
 
 from os.path import join
-from datasets import load_dataset
 import pandas as pd
 from torch.utils.data import Dataset, DataLoader
 import json
@@ -33,9 +31,28 @@ from PIL import Image, ImageFile
 img_path = "test.jpg"
 
 
+class AestheticScorer(torch.nn.Module):
+    def __init__(self, path_to_params="improved-aesthetic-predictor/sac+logos+ava1-l14-linearMSE.pth"):
+        super().__init__()
+        self.model = MLP(768)  # CLIP embedding dim is 768 for CLIP ViT L 14
+        self.model.load_state_dict(torch.load(path_to_params))
+
+        self.clipmodel, self.preprocess = clip.load("ViT-L/14", device='cuda')
+        self.models = torch.nn.ModuleList([self.clipmodel, self.model])
+        
+    def forward(self, image):
+        image_features = self.models[0].encode_image(image)
+        image_features /= image_features.norm(dim=-1, keepdim=True)
+        image_features = image_features.to(torch.float32)
+        prediction = self.models[1](image_features)
+        return prediction
+
+    def get_preprocess(self):
+        return self.preprocess
+
 
 # if you changed the MLP architecture during training, change it also here:
-class MLP(pl.LightningModule):
+class MLP(torch.nn.Module):
     def __init__(self, input_size, xcol='emb', ycol='avg_rating'):
         super().__init__()
         self.input_size = input_size
@@ -122,6 +139,7 @@ if __name__ == "__main__":
         for image, label, idxs in loader:
             image_features = model2.encode_image(image)
             image_features /= image_features.norm(dim=-1, keepdim=True)
+            image_features.to(torch.float32)
             prediction = model(image_features)
             print(prediction)
             for idx, score in zip(idxs, prediction):

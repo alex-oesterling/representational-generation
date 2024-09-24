@@ -40,7 +40,7 @@ class FaceDetector:
             # faces_from_app = self.app(gray_image)
             faces_from_app = self.app(image_np, 1)
             num_faces = len(faces_from_app)
-            if num_faces == 1:
+            if num_faces >= 1:
                 # face_from_app = self._get_largest_face_app(faces_from_app, dim_max=image_np.shape[0], dim_min=0)
                 # faces = self._crop_face(images[idx], bbox, target_size=[224,224], fill_value=fill_value)
                 
@@ -75,6 +75,13 @@ class FaceDetector:
         # aligned_facess_app = torch.cat(aligned_facess_app, dim=0)
                 
         return face_indicators, face_bboxs
+    
+    def process_pil_image(self, image):
+        image_np = np.array(image)
+
+        faces_from_app = self.app(image_np, 1)
+        num_faces = len(faces_from_app)
+        return num_faces >= 1
     
     def extract_position(self, image, bbox):
         bbox = bbox.rect
