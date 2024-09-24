@@ -89,7 +89,7 @@ class Trainer(GenericTrainer):
     
     def train(self, accelerator=None):
         # loader = data_handler.get_loader(self.args)
-        loader = data_handler.DataloaderFactory.get_dataloader(dataname='fairface', args=args)
+        loader = data_handler.DataloaderFactory.get_dataloader(dataname='fairface', args=self.args)
         model = self.model
         self.accelerator = accelerator
         self.tokenizer = CLIPTokenizer.from_pretrained(

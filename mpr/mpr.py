@@ -98,6 +98,7 @@ def getMPR(groups, dataset, k=0, curation_set=None, statistics=None, modelname=N
             else:
                 q = _compute_intersectional_probabilities(curation_set[:,idxs], depth)
             mpr = 0.5 * np.sum(np.abs(p - q))
+            print(group_list[idxs], mpr, p, q)
             if max_mpr < mpr:
                 max_mpr = mpr
                 max_idxs = idxs
@@ -127,13 +128,18 @@ def oracle_function(indices, dataset, curation_set=None, modelname='linear'):
     if modelname == 'linear' or 'boolean' in modelname:
         # model = LinearRegression()
         k = int(np.sum(indices))
-        expanded_dataset = np.concatenate((dataset, curation_set), axis=0)
-        curation_indicator = np.concatenate((np.zeros(dataset.shape[0]), np.ones(curation_set.shape[0])))
-        a_expanded = np.concatenate((indices, np.zeros(curation_set.shape[0])))
-        m = curation_set.shape[0]
-        alpha = (a_expanded/k - curation_indicator/m)
-        reg = np.dot(alpha, expanded_dataset)
-        reg = reg/np.linalg.norm(reg)
+        dataset_mean = np.mean(dataset, axis=0)
+        curation_mean = np.mean(curation_set, axis=0)
+        diff = dataset_mean - curation_mean
+        reg = diff / np.linalg.norm(diff)
+
+        # expanded_dataset = np.concatenate((dataset, curation_set), axis=0)
+        # curation_indicator = np.concatenate((np.zeros(dataset.shape[0]), np.ones(curation_set.shape[0])))
+        # a_expanded = np.concatenate((indices, np.zeros(curation_set.shape[0])))
+        # m = curation_set.shape[0]
+        # alpha = (a_expanded/k - curation_indicator/m)
+        # reg = np.dot(alpha, expanded_dataset)
+        # reg = reg/np.linalg.norm(reg)
         return reg
 
     elif modelname == 'l2':

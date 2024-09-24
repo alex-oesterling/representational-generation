@@ -9,7 +9,7 @@ import torchvision.transforms.functional as TF
 
 import random 
 
-from transformers import BlipProcessor, BlipModel, BlipForConditionalGeneration, BlipForQuestionAnswering
+# from transformers import BlipProcessor, BlipModel, BlipForConditionalGeneration, BlipForQuestionAnswering
 
 class DataloaderFactory:
     def __init__(self):

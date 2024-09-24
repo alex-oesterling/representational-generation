@@ -9,6 +9,7 @@ from face_detector import FaceDetector
 from torchvision import transforms
 import pickle
 from copy import copy
+from peft import LoraConfig
 
 group_idx ={
     'gender' : 0,
@@ -41,8 +42,8 @@ def main():
 
     args = parser.parse_args()
 
-    if args.trainer not in ['scratch',  'fairdiffusion'] and args.model_path is None:
-        raise ValueError("Model path should not be None if trainer is not scratch or fairdiffusion")
+    if args.trainer not in ['scratch',  'fairdiffusion', 'entigen'] and args.model_path is None:
+        raise ValueError("Model path should not be None if trainer is not scratch, fairdiffusion or entigen")
 
     set_seed(args.seed)
 
@@ -62,8 +63,22 @@ def main():
         torch_dtype=torch.float16, 
         cache_dir=cache_dir
         )
+    elif 'finetuning' in args.trainer:
+        model = networks.ModelFactory.get_model(modelname=args.model, train=True)
+        # text_lora_config = LoraConfig(
+        #         r=50,
+        #         lora_alpha=50,
+        #         init_lora_weights="gaussian",
+        #         target_modules=["q_proj", "k_proj", "v_proj", "out_proj"],
+        # )
+        # model.text_encoder.add_adapter(text_lora_config)
+        # lora_dict = torch.load(args.model_path)
+        # model.text_encoder.load_state_dict(lora_dict, strict=False)
+        model.load_lora_weights(args.model_path)
+        print('Loaded lora weights')
     elif args.model_path is None:
         model = networks.ModelFactory.get_model(modelname=args.model, train=False)
+    
     else:
         if args.trainer not in args.model_path:
             raise ValueError(f"Model name and path are not matching")
@@ -80,6 +95,8 @@ def main():
         adjectives = np.array(adjectives)
         print(adjectives)
         file.close()
+
+    # onlt for entigen
 
     base_path = f'/n/holyscratch01/calmon_lab/Lab/datasets/{args.trainer}'
     if args.trainer != 'scratch':
@@ -118,10 +135,17 @@ def main():
         check_log_dir(path_filtered)
         
         # make prompts
-        prefix = 'a' if concept[0].lower() in ['a','e','i','o','u'] else 'an'
-        template += f"{prefix} {concept}"
+        prefix = 'an' if concept[0].lower() in ['a','e','i','o','u'] else 'a'
+        prompt = template + f"{prefix} {concept}"
         if concept in traits[:4]:
-            template += " person"
+            prompt += " person"
+
+        if args.trainer == 'entigen':
+            prepend_prompt = f" if all individuals can be a {concept} irrespective of their " 
+            for _g in args.group:
+                prepend_prompt += f'{_g}/'
+            prepend_prompt = prepend_prompt[:-1]
+            prompt += prepend_prompt
 
         # for fairdiffusion
         if args.trainer == 'fairdiffusion':
@@ -167,12 +191,16 @@ def main():
                 num_for_print += 100
                 print(f"Generated {img_num} images")
                 
+            # deprecated
             if args.use_adjective:
                 adj_idx = np.random.choice(a=adjectives.size)
                 adjective = adjectives[adj_idx]
                 prompt = f"A photo of the face of a {adjective}{concept}"
-            else:
-                prompt = template + f"{prefix} {concept}"
+            # else:
+                # prompt = template + f"{prefix} {concept}"
+            
+            if img_num == 0:
+                print("Generation starts with the prompt of ", prompt)
 
             if args.trainer != 'fairdiffusion':
                 images = model(prompt=prompt, num_images_per_prompt=args.n_gen_per_iter, generator=gen).images
