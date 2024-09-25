@@ -24,30 +24,45 @@ class FaceDetector:
         # self.app = dlib.get_frontal_face_detector()
         self.app = dlib.cnn_face_detection_model_v1('/n/holyscratch01/calmon_lab/Lab/datasets/stuffs/dlib_models/mmod_human_face_detector.dat')
 
+    def __get_largest_face_app(self, faces, image):
+        area_max = 0
+        idx_max = 0
+        for idx in range(len(faces)):
+            left, top, right, bottom = self.extract_position(image, faces[idx])
+            bbox = faces[idx]
+            area = (right - left) * (bottom - top)
+            if area > area_max:
+                area_max = area
+                idx_max = idx
+        return faces[idx_max]
     
-    def process_tensor_image(self, images, fill_value=-1):
+
+    def process_tensor_image(self, images, fill_value=-1, torch_tensor=True):
         faces = []
         face_indicators = []
         face_bboxs = []
-        images_np = (images*255).cpu().detach().permute(0,2,3,1).numpy().astype(np.uint8)
+        if torch_tensor:
+            images = (images*255).cpu().detach().permute(0,2,3,1).numpy().astype(np.uint8)
         
         # images_np = images.permute(0,2,3,1).float().numpy().astype(np.uint8)
         num_faces_list = []
-        for idx, image_np in enumerate(images_np):
+        for idx, image in enumerate(images):
             # faces_from_app = self.app.get(image_np[:,:,[2,1,0]])
             # faces_from_app = self.app.get(image_np[:,:,[2,1,0]])
             # gray_image = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
             # faces_from_app = self.app(gray_image)
-            faces_from_app = self.app(image_np, 1)
+            faces_from_app = self.app(image, 1)
             num_faces = len(faces_from_app)
             num_faces_list.append(num_faces)
-            if num_faces == 1:
-                # face_from_app = self._get_largest_face_app(faces_from_app, dim_max=image_np.shape[0], dim_min=0)
+            if num_faces >= 1:
+                if num_faces > 1:
+                    faces_from_app = self.__get_largest_face_app(faces_from_app, image)
+                    faces_from_app = [faces_from_app]
                 # faces = self._crop_face(images[idx], bbox, target_size=[224,224], fill_value=fill_value)
                 
                 # face_landmarks = np.array(face_from_app["kps"])
                 # aligned_faces = image_pipeline(images[idx], face_landmarks)
-                
+
                 face_indicators.append(True)
                 face_bboxs.extend(faces_from_app)
                 # facess.append(faces.unsqueeze(dim=0))
@@ -68,9 +83,12 @@ class FaceDetector:
                 face_indicators.append(False)
         # print(num_faces_list)
         
-        print(f"The number of images filtered : {len(images_np)-sum(face_indicators)}")
+        print(f"The number of images filtered : {len(images)-sum(face_indicators)}")
         
-        face_indicators = torch.tensor(face_indicators).to(device=images.device)
+        if torch_tensor:
+            face_indicators = torch.tensor(face_indicators).to(device=images.device)
+        else:
+            face_indicators = torch.tensor(face_indicators)
         # face_bboxs = torch.tensor(face_bboxs).to(device=images.device)
         # facess = torch.cat(facess, dim=0)
         # face_landmarks_app = torch.cat(face_landmarks_app, dim=0)
@@ -78,13 +96,45 @@ class FaceDetector:
                 
         return face_indicators, face_bboxs
     
+    def process_batched_tensor_image(self, images, fill_value=-1):
+        faces = []
+        face_indicators = []
+        face_bboxs = []
+        
+        # images_np = (images*255).cpu().detach().permute(0,2,3,1).numpy().astype(np.uint8)
+        # print(images_np[0])
+        # images= dlib.convert_image(images_np)
+        
+        num_faces_list = []
+        face_indicators = []
+        face_bboxs = []
+        print('start detection')
+        faces_from_apps = self.app(images, 1, batch_size=len(images))
+        num_images = 0
+        for face_from_app in faces_from_apps:
+            if len(face_from_app) >= 1:
+                face_indicators.append(True)
+                face_bboxs.extend(face_from_app)
+                num_images += 1
+        print(f"Number of images with faces: {num_images}")
+        return face_indicators, face_bboxs    
+
+    def process_pil_image(self, image):
+        image_np = np.array(image)
+
+        faces_from_app = self.app(image_np, 1)
+        num_faces = len(faces_from_app)
+        return num_faces >= 1
+    
     def extract_position(self, image, bbox):
         bbox = bbox.rect
         # left, top, width, height = bbox.left(), bbox.top(), bbox.width(), bbox.height()
         left, top, right, bottom = bbox.left(), bbox.top(), bbox.right(), bbox.bottom()
+        if right < left:
+            print(left, top, right, bottom)
         left = max(left, 0)
         top = max(top, 0)
-        if type(image) == torch.Tensor:
+        if type(image) == torch.Tensor or type(image) == np.ndarray:
             right = min(right, image.shape[-1])
             bottom = min(bottom, image.shape[-2])
         # if image is PIL Image
@@ -129,7 +179,8 @@ if __name__ == "__main__":
         filtered_ids.extend(idxs[~flags].tolist())
         unfiltered_ids.extend(idxs[flags].tolist())
         for idx, bbox in zip(idxs[flags], bboxs):
-            bbox_dic[idx.item()] = 0#face_detector.extract_position(image, bbox)
+            # bbox_dic[idx.item()] = 0
+            face_detector.extract_position(image, bbox)
 
     # Save the filtered and unfiltered IDs to files
     with open(os.path.join(args.dataset_path,'filtered_ids.txt'), 'w') as f:

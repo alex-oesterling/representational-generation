@@ -52,7 +52,8 @@ class GenericDataset(data.Dataset):
     
     def turn_on_detect(self):
         self.face_detect = True
-        self.bbox_dic = self._load_bbox_dic()
+        if not hasattr(self, 'bbox_dic'):
+            self.bbox_dic = self._load_bbox_dic()
     
     def turn_off_detect(self):
         self.face_detect = False
