@@ -11,6 +11,7 @@ dataset_dict = {'stable_bias_i' : ['data_handler.stable_bias','StableBiasIdentit
                 'celeba' : ['data_handler.celeba','CelebA'],
                 'openface': ['data_handler.openface','OpenFace'],
                 'custom': ['data_handler.custom_dataset','CustomDataset'],
+                'mscoco': ['data_handler.mscoco','MSCoco'],
                 # 'fairdiffusion' : ['data_handler.general','General'],
                 # 'fairdiffusion_gender' : ['data_handler.general','General']
                }
@@ -42,12 +43,14 @@ class GenericDataset(data.Dataset):
             # self.bbox_dic = self._load_bbox_dic()
 
     def _load_bbox_dic(self):
+        # Make sure this function should not used in mscoco
         path = os.path.join(self.dataset_path,'bbox_dic.pkl')
         if os.path.exists(path):
             with open(path, 'rb') as f:
                 bbox_dic = pickle.load(f)
         else:
             raise ValueError(f"bbox_dic.pkl does not exist")
+
         return bbox_dic
     
     def turn_on_detect(self):

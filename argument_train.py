@@ -18,6 +18,8 @@ def get_args():
     parser.add_argument('-wd', '--weight_decay', default=0.0001, type=float, help='weight_decay')    
     parser.add_argument('--n-iters', default=50, type=int, help='total iterations')
     parser.add_argument('--trainer-group', type=str, nargs='+', default=['gender','age','race'])    
+    parser.add_argument('--training-dataset', type=str, default=None)    
+    parser.add_argument('--bal-sampling', default=False, action='store_true')
 
     parser.add_argument('--iterations', type=int, default=10000, help='number of epochs')
     parser.add_argument('--batch-size', type=int, default=256)
@@ -35,7 +37,6 @@ def get_args():
     # for finetuning
     parser.add_argument('--finetuning-ver', type=str, default='ver1',choices = ['ver1','ver2'])
     parser.add_argument('--normalize', default=False, action='store_true', help='normalization for x')
-    parser.add_argument('--export-mode', default=False, action='store_true', help='export a saved ckpt to a model')
     
     parser.add_argument('--mpr_num_batches', type=int, default=4, help='the number of batches for computing MPRs')
     parser.add_argument('--vision-encoder', type=str, default='CLIP',choices = ['BLIP', 'CLIP', 'PATHS'])

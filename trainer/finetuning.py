@@ -40,7 +40,6 @@ import wandb
 
 import torch
 from torch import nn
-from torchvision.models.mobilenetv3 import mobilenet_v3_large, MobileNet_V3_Large_Weights
 from torch.utils.data import Dataset
 from torchvision import transforms
 
@@ -56,20 +55,11 @@ from accelerate.logging import get_logger
 
 import diffusers
 from diffusers import (
-    AutoencoderKL,
-    DPMSolverMultistepScheduler,
     UNet2DConditionModel,
-)
-from diffusers.loaders import (
-    StableDiffusionLoraLoaderMixin,
-)
-from diffusers.models.attention_processor import (
-    LoRAAttnProcessor,
 )
 from diffusers import StableDiffusionPipeline, UNet2DConditionModel
 
 from diffusers.optimization import get_scheduler
-from diffusers.loaders import AttnProcsLayers
 from diffusers.training_utils import EMAModel
 from diffusers.utils.torch_utils import is_compiled_module
 from diffusers.utils import convert_state_dict_to_diffusers
@@ -153,84 +143,6 @@ class Trainer(GenericTrainer):
                 continue
         self.output_dim = output_dim
 
-    def export_checkpoint(self, accelerator=None):
-        self.accelerator = accelerator
-
-        self._load_model()
-        self._set_lora_params()
-        
-        self._set_optimizer()
-        if self.args.train_text_encoder:
-            print(self.text_encoder_lora_layers[0])
-            self.text_encoder, self.text_encoder_lora_ema = self.accelerator.prepare(self.text_encoder, self.text_encoder_lora_ema)
-            self.accelerator.register_for_checkpointing(self.text_encoder_lora_ema)
-        if self.args.train_unet:
-            self.unet_lora_layers, self.unet_lora_ema = self.accelerator.prepare(self.unet_lora_layers, self.unet_lora_ema)
-            self.accelerator.register_for_checkpointing(self.unet_lora_ema)
-            # Potentially load in the weights and states from a previous save
-        
-        if not self.args.resume_from_checkpoint:
-            raise ValueError("resume_from_checkpoint must be provided.")
-        if self.args.resume_from_checkpoint:
-            if not os.path.exists(self.args.resume_from_checkpoint):
-                raise ValueError(f"{self.args.resume_from_checkpoint}' does not exist.")
-            
-            self.args.export_dir = str(Path(self.args.resume_from_checkpoint).parent / (Path(self.args.resume_from_checkpoint).name + "_exported"))
-            if not os.path.exists(self.args.export_dir):
-                os.makedirs(self.args.export_dir)
-
-            
-            if self.args.train_unet:
-                self.unet_lora_ema.to(accelerator.device)
-
-            if self.args.train_text_encoder:
-                self.text_encoder_lora_ema.to(accelerator.device)
-                text_encoder_lora_dict = {}
-                text_encoder_lora_params_name_order = []
-                for lora_param in self.text_encoder_lora_layers:
-                    for name, param in self.text_encoder.named_parameters():
-                        if param is lora_param:
-                            # param.data = lora_param.data
-                            print(name, param.data.dtype)
-                            text_encoder_lora_dict[name] = lora_param
-                            text_encoder_lora_params_name_order.append(name)
-                            break
-                
-                # need to recreate text_encoder_lora_ema_dict
-                text_encoder_lora_ema_dict = {}
-                for name, shadow_param in itertools.zip_longest(text_encoder_lora_params_name_order, self.text_encoder_lora_ema.shadow_params):
-                    text_encoder_lora_ema_dict[name] = shadow_param
-                assert text_encoder_lora_ema_dict.__len__() == text_encoder_lora_dict.__len__(), "length does not match! something wrong happened while converting lora params to a state dict."
-
-            accelerator.print(f"Resuming from checkpoint {self.args.resume_from_checkpoint}")
-            accelerator.load_state(self.args.resume_from_checkpoint)
-            print(self.text_encoder_lora_layers[0])
-            unet_state_dict = None
-            if self.args.train_unet:    
-                unwrapped_model = self.unwrap_model(self.unet)
-                unet_state_dict = convert_state_dict_to_diffusers(
-                    get_peft_model_state_dict(unwrapped_model)
-                )
-            text_encoder_state_dict = None
-            if self.args.train_text_encoder:
-                text_encoder_lora_dict = {key: value.to('cpu') for key, value in text_encoder_lora_dict.items()}
-                torch.save(text_encoder_lora_dict, self.args.resume_from_checkpoint + "/text_encoder_lora_dict.pth")
-                # self.text_encoder.load_state_dict(text_encoder_lora_dict, strict=False)
-                # unwrapped_model = self.unwrap_model(self.text_encoder)
-                # text_encoder_state_dict = convert_state_dict_to_diffusers(
-                #     get_peft_model_state_dict(unwrapped_model)
-                # )
-                # for key in text_encoder_state_dict.keys():
-                #     print(key)            
-            # StableDiffusionPipeline.save_lora_weights(
-            #     save_directory=self.args.resume_from_checkpoint,
-            #     unet_lora_layers=unet_state_dict,
-            #     text_encoder_lora_layers=text_encoder_lora_dict,
-            #     safe_serialization=True,
-            # )
-
-
-        print("Finished exporting checkpoint.")
 
     def _load_model(self):
         # Load the model
@@ -293,15 +205,14 @@ class Trainer(GenericTrainer):
                 target_modules=["to_k", "to_q", "to_v", "to_out.0"],
             )
 
-            self.unet.add_adapter(unet_lora_config)
+            self.unet.add_adapter(unet_lora_config, a=None)
             unet_lora_layers = list(filter(lambda p: p.requires_grad, self.unet.parameters()))
             for p in unet_lora_layers:
                 p.data = p.data.float()
             self.unet_lora_layers = unet_lora_layers
             
-            if not self.args.export_mode:
-                for p in unet_lora_layers.parameters():
-                    torch.distributed.broadcast(p, src=0)
+            for p in unet_lora_layers.parameters():
+                torch.distributed.broadcast(p, src=0)
             
             self.unet_lora_ema = EMAModel(filter(lambda p: p.requires_grad, self.unet.parameters()), decay=self.args.EMA_decay)
             self.unet_lora_ema.to(self.accelerator.device)
@@ -324,9 +235,8 @@ class Trainer(GenericTrainer):
             for p in text_encoder_lora_layers:
                 p.data = p.data.float()
 
-            if not self.args.export_mode:
-                for p in text_encoder_lora_layers:
-                    torch.distributed.broadcast(p, src=0)
+            for p in text_encoder_lora_layers:
+                torch.distributed.broadcast(p, src=0)
 
             self.text_encoder_lora_layers = text_encoder_lora_layers
                         
@@ -427,7 +337,7 @@ class Trainer(GenericTrainer):
         self.face_feats_model.eval()   
     
 
-    def train(self, accelerator=None):
+    def train(self, accelerator=None, loader=None):
         
         self.accelerator = accelerator
 
@@ -1536,3 +1446,84 @@ def clean_checkpoint(ckpts_save_dir, name, checkpoints_total_limit):
         for removing_checkpoint in removing_checkpoints:
             removing_checkpoint = os.path.join(ckpts_save_dir, removing_checkpoint)
             shutil.rmtree(removing_checkpoint)
+
+
+    # # deprecated
+    # def export_checkpoint(self, accelerator=None):
+    #     self.accelerator = accelerator
+
+    #     self._load_model()
+    #     self._set_lora_params()
+        
+    #     self._set_optimizer()
+    #     if self.args.train_text_encoder:
+    #         print(self.text_encoder_lora_layers[0])
+    #         self.text_encoder, self.text_encoder_lora_ema = self.accelerator.prepare(self.text_encoder, self.text_encoder_lora_ema)
+    #         self.accelerator.register_for_checkpointing(self.text_encoder_lora_ema)
+    #     if self.args.train_unet:
+    #         self.unet_lora_layers, self.unet_lora_ema = self.accelerator.prepare(self.unet_lora_layers, self.unet_lora_ema)
+    #         self.accelerator.register_for_checkpointing(self.unet_lora_ema)
+    #         # Potentially load in the weights and states from a previous save
+        
+    #     if not self.args.resume_from_checkpoint:
+    #         raise ValueError("resume_from_checkpoint must be provided.")
+    #     if self.args.resume_from_checkpoint:
+    #         if not os.path.exists(self.args.resume_from_checkpoint):
+    #             raise ValueError(f"{self.args.resume_from_checkpoint}' does not exist.")
+            
+    #         self.args.export_dir = str(Path(self.args.resume_from_checkpoint).parent / (Path(self.args.resume_from_checkpoint).name + "_exported"))
+    #         if not os.path.exists(self.args.export_dir):
+    #             os.makedirs(self.args.export_dir)
+
+            
+    #         if self.args.train_unet:
+    #             self.unet_lora_ema.to(accelerator.device)
+
+    #         if self.args.train_text_encoder:
+    #             self.text_encoder_lora_ema.to(accelerator.device)
+    #             text_encoder_lora_dict = {}
+    #             text_encoder_lora_params_name_order = []
+    #             for lora_param in self.text_encoder_lora_layers:
+    #                 for name, param in self.text_encoder.named_parameters():
+    #                     if param is lora_param:
+    #                         # param.data = lora_param.data
+    #                         print(name, param.data.dtype)
+    #                         text_encoder_lora_dict[name] = lora_param
+    #                         text_encoder_lora_params_name_order.append(name)
+    #                         break
+                
+    #             # need to recreate text_encoder_lora_ema_dict
+    #             text_encoder_lora_ema_dict = {}
+    #             for name, shadow_param in itertools.zip_longest(text_encoder_lora_params_name_order, self.text_encoder_lora_ema.shadow_params):
+    #                 text_encoder_lora_ema_dict[name] = shadow_param
+    #             assert text_encoder_lora_ema_dict.__len__() == text_encoder_lora_dict.__len__(), "length does not match! something wrong happened while converting lora params to a state dict."
+
+    #         accelerator.print(f"Resuming from checkpoint {self.args.resume_from_checkpoint}")
+    #         accelerator.load_state(self.args.resume_from_checkpoint)
+    #         print(self.text_encoder_lora_layers[0])
+    #         unet_state_dict = None
+    #         if self.args.train_unet:    
+    #             unwrapped_model = self.unwrap_model(self.unet)
+    #             unet_state_dict = convert_state_dict_to_diffusers(
+    #                 get_peft_model_state_dict(unwrapped_model)
+    #             )
+    #         text_encoder_state_dict = None
+    #         if self.args.train_text_encoder:
+    #             text_encoder_lora_dict = {key: value.to('cpu') for key, value in text_encoder_lora_dict.items()}
+    #             torch.save(text_encoder_lora_dict, self.args.resume_from_checkpoint + "/text_encoder_lora_dict.pth")
+    #             # self.text_encoder.load_state_dict(text_encoder_lora_dict, strict=False)
+    #             # unwrapped_model = self.unwrap_model(self.text_encoder)
+    #             # text_encoder_state_dict = convert_state_dict_to_diffusers(
+    #             #     get_peft_model_state_dict(unwrapped_model)
+    #             # )
+    #             # for key in text_encoder_state_dict.keys():
+    #             #     print(key)            
+    #         # StableDiffusionPipeline.save_lora_weights(
+    #         #     save_directory=self.args.resume_from_checkpoint,
+    #         #     unet_lora_layers=unet_state_dict,
+    #         #     text_encoder_lora_layers=text_encoder_lora_dict,
+    #         #     safe_serialization=True,
+    #         # )
+
+
+    #     print("Finished exporting checkpoint.")

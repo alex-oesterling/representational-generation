@@ -140,6 +140,7 @@ def embed_images(clipmodel, facedetector, aestheticscorer, aestheticthreshold, a
     dataset.preprocess = preprocess
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=512, shuffle=False, num_workers=2)
     
+    print('start scoring')
     for data in tqdm(dataloader):
         images, _, ids = data
         images = images.to('cuda')
@@ -150,6 +151,9 @@ def embed_images(clipmodel, facedetector, aestheticscorer, aestheticthreshold, a
         print(f"Time to process 512 images: {processing_time} seconds")
         for id, score in zip(ids, scores):
             output['score'][id.item()] = score.item()
+    
+    with open(os.path.join(args.out_dir, "mscoco_info.pkl"), "wb") as outfile:
+        pickle.dump(dict(output), outfile)
 
     _, clip_transform = clip.load("ViT-B/32", device= 'cpu')    
     dataset = MSCOCODataset(args.data_dir, preprocess=clip_transform, bbox_dic=output['bbox'])
@@ -204,7 +208,7 @@ def embed_images(clipmodel, facedetector, aestheticscorer, aestheticthreshold, a
         #     output["age"][str(age_pred[i])].append(ids[i].item())
             # print(output)
             # exit()
-    with open(os.path.join(args.out_dir, "filtered_mscoco.pkl"), "w") as outfile:
+    with open(os.path.join(args.out_dir, "mscoco_info.pkl"), "wb") as outfile:
         pickle.dump(dict(output), outfile)
 
     print(output)

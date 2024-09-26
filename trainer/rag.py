@@ -37,6 +37,7 @@ from pathlib import Path
 import pickle
 import wandb
 
+import torch.nn.functional as F
 
 import torch
 from torch import nn
@@ -55,21 +56,7 @@ from transformers import CLIPTextModel, CLIPTokenizer, CLIPImageProcessor, CLIPV
 from accelerate.logging import get_logger
 
 import diffusers
-from diffusers import (
-    AutoencoderKL,
-    DPMSolverMultistepScheduler,
-    UNet2DConditionModel,
-)
-from diffusers.loaders import (
-    LoraLoaderMixin,
-)
-from diffusers.models.attention_processor import (
-    LoRAAttnProcessor,
-)
 from diffusers.optimization import get_scheduler
-from diffusers.loaders import AttnProcsLayers
-from diffusers.training_utils import EMAModel
-from peft import LoraConfig
 
 # you MUST import torch before insightface
 # otherwise onnxruntime, used by FaceAnalysis, can only use CPU
@@ -86,38 +73,53 @@ class Trainer(GenericTrainer):
     def __init__(self, **kwargs):
         super(Trainer, self).__init__(**kwargs)
         self.modelname = self.args.functionclass
+
+    # def _load_model(self):        
     
-    def train(self, accelerator=None):
+    def train(self, accelerator=None, loader=None):
         # loader = data_handler.get_loader(self.args)
-        loader = data_handler.DataloaderFactory.get_dataloader(dataname='fairface', args=self.args)
-        model = self.model
         self.accelerator = accelerator
+        self.weight_dtype_high_precision = torch.float32
+        self.weight_dtype = torch.float32
+        if self.accelerator != None:
+            if self.accelerator.mixed_precision == "fp16":
+                self.weight_dtype = torch.float16
+            elif self.accelerator.mixed_precision == "bf16":
+                self.weight_dtype = torch.bfloat16
+
+        model = self.model
+        
         self.tokenizer = CLIPTokenizer.from_pretrained(
             model.name_or_path,
             subfolder="tokenizer"
             )
-        self.text_encoder = model.text_encoder.to(self.accelerator.device)
-        self.vae = model.vae.to(self.accelerator.device)
-        self.unet = model.unet.to(self.accelerator.device)
+        self.text_encoder = model.text_encoder.to(self.accelerator.device,dtype=self.weight_dtype)
+        self.vae = model.vae.to(self.accelerator.device, dtype=self.weight_dtype)
+        self.unet = model.unet.to(self.accelerator.device, dtype=self.weight_dtype)
         self.noise_scheduler = model.scheduler
         print('just ckecking the noise_scheduler:', self.noise_scheduler)
 
         self.vision_encoder = networks.ModelFactory.get_model(modelname='CLIP').to(self.accelerator.device)
-
-        # Make linear projectors
-        prompt = "a photo of person"
-        prompts_token = self.tokenizer([prompt], return_tensors="pt", padding=True)
-        prompts_token["input_ids"] = prompts_token["input_ids"].to(self.accelerator.device)
-        prompts_token["attention_mask"] = prompts_token["attention_mask"].to(self.accelerator.device)
-
-        prompt_embeds = self.text_encoder(
-            prompts_token["input_ids"],
-            prompts_token["attention_mask"],
-        )
-        prompt_embeds = prompt_embeds[0]
-        print(prompt_embeds.shape)
-        token_embedding_dim = prompt_embeds.shape[-1]
-        self.linear_projector = nn.Linear(512, token_embedding_dim)
+        
+        # uncond_tokens = [""] 
+        # max_length = prompt_embeds.shape[1]
+        # print(max_length)
+        # uncond_input = self.tokenizer(
+        #         uncond_tokens,
+        #         padding="max_length",
+        #         max_length=max_length,
+        #         truncation=True,
+        #         return_tensors="pt",
+        #     )
+        # uncond_input["input_ids"] = uncond_input["input_ids"].to(self.accelerator.device)
+        # uncond_input["attention_mask"] = uncond_input["attention_mask"].to(self.accelerator.device)
+        # negative_prompt_embeds = self.text_encoder(
+        #     uncond_input["input_ids"],
+        #     uncond_input["attention_mask"],
+        # )
+        # negative_prompt_embeds = negative_prompt_embeds[0]
+        # print(negative_prompt_embeds.shape)
+        # prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds]).to(self.weight_dtype)
         
         # We only train the additional adapter LoRA layers
         self.text_encoder.requires_grad_(False)
@@ -127,22 +129,27 @@ class Trainer(GenericTrainer):
         self.unet.enable_gradient_checkpointing()
         self.vae.enable_gradient_checkpointing()
 
-
         # For mixed precision training we cast all non-trainable weigths (self.vae, non-lora text_encoder and non-lora unet) to half-precision
         # as these weights are only used for inference, keeping weights in full precision is not required.
-        self.weight_dtype_high_precision = torch.float32
-        self.weight_dtype = torch.float32
-        if self.accelerator != None:
-            if self.accelerator.mixed_precision == "fp16":
-                self.weight_dtype = torch.float16
-            elif self.accelerator.mixed_precision == "bf16":
-                self.weight_dtype = torch.bfloat16
 
-        # Move self.unet, self.vae and text_encoder to device and cast to self.weight_dtype
-        self.text_encoder.to(self.accelerator.device, dtype=self.weight_dtype)
-        self.unet.to(self.accelerator.device, dtype=self.weight_dtype)
-        self.vae.to(self.accelerator.device, dtype=self.weight_dtype)
-        
+        # Make linear projectors
+        prompt = "a photo of person" 
+        prompts_token = self.tokenizer([prompt], return_tensors="pt", padding=True)
+        prompts_token["input_ids"] = prompts_token["input_ids"].to(self.accelerator.device)
+        prompts_token["attention_mask"] = prompts_token["attention_mask"].to(self.accelerator.device)
+
+        prompt_embeds = self.text_encoder(
+            prompts_token["input_ids"],
+            prompts_token["attention_mask"],
+        )
+        prompt_embeds = prompt_embeds[0]
+        prompt_embeds = prompt_embeds.to(self.weight_dtype)
+        print(prompt_embeds.shape)
+        max_length = prompt_embeds.shape[1]
+
+        token_embedding_dim = prompt_embeds.shape[-1]
+        self.linear_projector = nn.Linear(512, token_embedding_dim).to(self.accelerator.device, dtype=self.weight_dtype_high_precision)
+
         params_to_optimize = self.linear_projector.parameters()
 
         optimizer = torch.optim.AdamW(
@@ -166,10 +173,10 @@ class Trainer(GenericTrainer):
             power=self.args.lr_power,
         )
         
-        optimizer, lr_scheduler = self.accelerator.prepare(
-                optimizer, lr_scheduler
+        self.linear_projector, optimizer, lr_scheduler = self.accelerator.prepare(
+                self.linear_projector, optimizer, lr_scheduler
             )
-
+        
         # Train!
         logger.info("***** Running training *****")
         logger.info(f"  Num Iterations = {self.args.iterations}")
@@ -178,44 +185,114 @@ class Trainer(GenericTrainer):
 
         # Only show the progress bar once on each machine.
         self.wandb_tracker = self.accelerator.get_tracker("wandb", unwrap=True)
+
         
-        for images in loader:
-            iter += 1
-            if iter > self.args.iterations:
-                break
-            images = images.to(self.accelerator.device, dtype=self.weight_dtype)
-            latents = self.vae.encode(images).latent_dist.sample()
-            latents = latents * self.vae.config.scaling_factor
 
-            # Sample noise that we'll add to the latents   
-            noise = torch.randn_like(latents)
-            bsz = latents.shape[0]
-            # Sample a random timestep for each image
-            timesteps = torch.randint(0, self.noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
-            timesteps = timesteps.long()
 
-            noisy_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
+        self.global_step = 0
+        while self.global_step < self.args.iterations:
+            # num_denoising_steps = random.choices(range(19,24), k=1)
+            # torch.distributed.broadcast_object_list(num_denoising_steps, src=0)
+            # num_denoising_steps = num_denoising_steps[0]
+            # self.noise_scheduler.set_timesteps(num_denoising_steps)
 
-            # Generate image tokens
-            image_embeds = self.vision_encoder.encode_image(images)
-            image_token_embeds = self.linear_projector(image_embeds)
-            image_token_embeds /= image_token_embeds.norm(dim=-1, keepdim=True)
+            # grad_coefs = []
+            # for i, t in enumerate(self.noise_scheduler.timesteps):
+            #     grad_coefs.append( self.noise_scheduler.alphas_cumprod[t].sqrt().item() * (1-self.noise_scheduler.alphas_cumprod[t]).sqrt().item() / (1-self.noise_scheduler.alphas[t].item()) )
+            # grad_coefs = np.array(grad_coefs)
+            # grad_coefs /= (math.prod(grad_coefs)**(1/len(grad_coefs)))
+            train_loss = 0.0
+            for image1, image2, idxs in tqdm(loader):
+                self.global_step += 1
+                if self.global_step > self.args.iterations:
+                    break
+                image2 = image2.to(self.accelerator.device, dtype=self.weight_dtype)
+                image1 = image1.to(self.accelerator.device)
+                latents = self.vae.encode(image2).latent_dist.sample()
+                latents = latents * self.vae.config.scaling_factor
+                latents = latents.to(self.weight_dtype)
+                # Sample noise that we'll add to the latents   
+                
+                noise = torch.randn_like(latents)
+                bsz = latents.shape[0]
+                # Sample a random timestep for each image
+                timesteps = torch.randint(0, self.noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
+                timesteps = timesteps.long()
 
-            # Concatenate the image tokens with text tokens
-            image_token_embeds = image_token_embeds.unsqueeze(1)
-            text_image_embeds = torch.cat([prompt_embeds, image_token_embeds], dim=1)
+                noisy_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
+                
+                # Generate image tokens
+                image_embeds = self.vision_encoder.encode_image(image1).to(self.weight_dtype) 
 
-            # Predict the noise residual and compute loss
-            model_pred = self.unet(noisy_latents, timesteps, text_image_embeds, return_dict=False)[0]
-            
-            target = noise
-            loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+                image_token_embeds = self.linear_projector(image_embeds)
+                image_token_embeds = image_token_embeds / image_token_embeds.norm(dim=-1, keepdim=True)
+                image_token_embeds = image_token_embeds.to(self.weight_dtype)
+                # print(image_token_embeds.dtype)
+                
+                # Concatenate the image tokens with text tokens
+                image_token_embeds = image_token_embeds.unsqueeze(1)
+                _prompt_embeds = prompt_embeds.repeat(bsz, 1, 1)
+                # repeaet prompt_embeds as much as the number of batch size
+                
+                text_image_embeds = torch.cat([_prompt_embeds, image_token_embeds], dim=1)
+                text_image_embeds = text_image_embeds.to(self.weight_dtype)
+                # repeat text_image as much as the number of batch size
+                
+                model_pred = self.unet(noisy_latents, timesteps, text_image_embeds, return_dict=False)[0]
 
-            avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean()
+                target = noise
+                # loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+                loss = F.mse_loss(model_pred, target, reduction="mean")
 
-            accelerator.backward(loss)
-            if accelerator.sync_gradients:
-                accelerator.clip_grad_norm_(unet.parameters(), args.max_grad_norm)
-            optimizer.step()
-            lr_scheduler.step()
-            optimizer.zero_grad()
+                # Gather the losses across all processes for logging (if we use distributed training).
+                avg_loss = accelerator.gather(loss.repeat(self.args.train_GPU_batch_size)).mean()
+                train_loss += avg_loss.item() #/ args.gradient_accumulation_steps
+
+                accelerator.backward(loss)
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(self.linear_projector.parameters(), self.args.max_grad_norm)
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
+
+                if self.accelerator.is_main_process:
+                    if self.global_step % self.args.checkpointing_steps == 0:
+                        # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
+                        if self.args.checkpoints_total_limit is not None:
+                            name = "checkpoint_tmp"
+                            clean_checkpoint(self.args.ckpts_save_dir, name, self.args.checkpoints_total_limit)
+
+                        save_path = os.path.join(self.args.ckpts_save_dir, f"checkpoint_tmp-{self.global_step}")
+                        self.accelerator.save_state(save_path)
+                        torch.save(self.linear_projector.state_dict(), save_path)
+                    
+                        logger.info(f"Accelerator checkpoint saved to {save_path}")
+                    
+                    if self.global_step % self.args.checkpointing_steps_long == 0:
+                        # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
+
+                        save_path = os.path.join(self.args.ckpts_save_dir, f"checkpoint-{self.global_step}")
+                        self.accelerator.save_state(save_path)
+                        torch.save(self.linear_projector.state_dict(), save_path)
+
+                        logger.info(f"Accelerator checkpoint saved to {save_path}")
+
+
+def clean_checkpoint(ckpts_save_dir, name, checkpoints_total_limit):
+    checkpoints = os.listdir(ckpts_save_dir)
+    checkpoints = [d for d in checkpoints if d.startswith(name)]
+    checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
+
+    # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
+    if len(checkpoints) >= checkpoints_total_limit:
+        num_to_remove = len(checkpoints) - checkpoints_total_limit + 1
+        removing_checkpoints = checkpoints[0:num_to_remove]
+
+        logger.info(
+            f"chekpoint name:{name}, {len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
+        )
+        logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
+
+        for removing_checkpoint in removing_checkpoints:
+            removing_checkpoint = os.path.join(ckpts_save_dir, removing_checkpoint)
+            shutil.rmtree(removing_checkpoint)

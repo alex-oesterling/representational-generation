@@ -6,7 +6,7 @@ from torchvision import transforms
 from torch.utils.data import DataLoader
 import torchvision.transforms.functional as TF
 
-
+from diffusers.image_processor import VaeImageProcessor
 import random 
 
 # from transformers import BlipProcessor, BlipModel, BlipForConditionalGeneration, BlipForQuestionAnswering
@@ -21,7 +21,6 @@ class DataloaderFactory:
         processor = None
         transform = None
         test_transform = None
-
         if args.vision_encoder == 'BLIP':
             from transformers import BlipProcessor
             processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
@@ -47,20 +46,41 @@ class DataloaderFactory:
                     transforms.ToTensor(),
                     transforms.Normalize(mean=mean, std=std)] 
                 )
+            
+        if args.trainer == 'rag':
+            processor = transforms.Compose(
+                [
+                    transforms.Resize((256, 256)),
+                    transforms.RandomHorizontalFlip(),
+                    transforms.ToTensor(),
+                    transforms.Normalize([0.5], [0.5]),
+                ]
+            )
+            import clip
+            _, transform = clip.load("ViT-L/14", device= 'cpu')
 
-        test_dataset = DatasetFactory.get_dataset(args, dataname, transform, processor, split='test')
-
-        if args.train:       # If training, use the training dataset
-            train_dataset = DatasetFactory.get_dataset(args, dataname, transform, processor, split='train')            
-            # val_dataset = DatasetFactory.get_dataset(argrs, dataname, transform, processor, split='val')
 
         def _init_fn(worker_id):
             np.random.seed(int(args.seed))
-            
-        test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.n_workers, worker_init_fn=_init_fn, pin_memory=True)
 
+        if dataname != 'mscoco': # mscoco doesn't have the test dataset
+            test_dataset = DatasetFactory.get_dataset(args, dataname, transform, processor, split='test')
+            test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.n_workers, worker_init_fn=_init_fn, pin_memory=True,)
+        else:
+            test_dataloader = None
+            
+        # If training, use the training dataset
         if args.train:
-            train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.n_workers, worker_init_fn=_init_fn, pin_memory=True, drop_last=True)
+            train_dataset = DatasetFactory.get_dataset(args, dataname, transform, processor, split='train')            
+            if args.bal_sampling:
+                if not hasattr(train_dataset, 'weights'):
+                    raise ValueError(f"Dataset does not have weights for balanced sampling")
+                from torch.utils.data.sampler import WeightedRandomSampler
+                weights = train_dataset.weights
+                sampler = WeightedRandomSampler(weights, len(weights), replacement=True)
+            else:
+                sampler = None
+            train_dataloader = DataLoader(train_dataset, batch_size=args.train_GPU_batch_size,  worker_init_fn=_init_fn, pin_memory=True, sampler=sampler)
             # val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, num_workers=args.n_workers, worker_init_fn=_init_fn, pin_memory=True, drop_last=True)
         
             # return train_dataloader, val_dataloader, test_dataloader

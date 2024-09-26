@@ -88,54 +88,53 @@ def main(args):
         # We need to initialize the trackers we use, and also store our configuration.
         # The trackers initializes automatically on the main process.
 
-        if not args.export_mode:
-            # folder_name = f"{args.trainer}/{args.train_images_per_prompt_GPU*accelerator.num_processes}_wImg-{args.weight_loss_img}-{args.factor1}-{args.factor2}_wFace-{args.weight_loss_face}_Th-{args.uncertainty_threshold}_loraR-{args.rank}_lr-{args.learning_rate}"#_{timestring}"
-            group_name = "".join([g[0].upper() for g in args.trainer_group])
-            # group_name = args.group[0]
+        # folder_name = f"{args.trainer}/{args.train_images_per_prompt_GPU*accelerator.num_processes}_wImg-{args.weight_loss_img}-{args.factor1}-{args.factor2}_wFace-{args.weight_loss_face}_Th-{args.uncertainty_threshold}_loraR-{args.rank}_lr-{args.learning_rate}"#_{timestring}"
+        group_name = "".join([g[0].upper() for g in args.trainer_group])
+        # group_name = args.group[0]
 
-            folder_name = f"{args.train_images_per_prompt_GPU*accelerator.num_processes}_wImg-{args.weight_loss_img}-loraR-{args.rank}_lr-{args.learning_rate}"#_{timestring}"
-            
-            if args.trainer == 'finetuning':
-                method_name = args.trainer + '_' + args.finetuning_ver
-            else:
-                method_name = args.trainer
-            args.imgs_save_dir = os.path.join('datasets', method_name, group_name, "imgs_in_training", folder_name)
-            args.ckpts_save_dir = os.path.join('trained_models', method_name, group_name, folder_name, "ckpts")
+        folder_name = f"{args.train_images_per_prompt_GPU*accelerator.num_processes}_wImg-{args.weight_loss_img}-loraR-{args.rank}_lr-{args.learning_rate}"#_{timestring}"
+        
+        if args.trainer == 'finetuning':
+            method_name = args.trainer + '_' + args.finetuning_ver
+        else:
+            method_name = args.trainer
+        args.imgs_save_dir = os.path.join('datasets', method_name, group_name, "imgs_in_training", folder_name)
+        args.ckpts_save_dir = os.path.join('trained_models', method_name, group_name, folder_name, "ckpts")
 
-            if accelerator.is_main_process:
-                os.makedirs(args.imgs_save_dir, exist_ok=True)
-                os.makedirs(args.ckpts_save_dir, exist_ok=True)
-                accelerator.init_trackers(
-                    args.trainer, 
-                    init_kwargs = {
-                        "wandb": {
-                            "name": folder_name, 
-                            "dir": args.output_dir
-                                }
-                        }
-                    )
+        if accelerator.is_main_process:
+            os.makedirs(args.imgs_save_dir, exist_ok=True)
+            os.makedirs(args.ckpts_save_dir, exist_ok=True)
+            accelerator.init_trackers(
+                args.trainer, 
+                init_kwargs = {
+                    "wandb": {
+                        "name": folder_name, 
+                        "dir": args.output_dir
+                            }
+                    }
+                )
 
         set_seed(args.seed, device_specific=True)
     else:
         accelerator = None
         utils.set_seed(args.seed)
 
-    if not args.export_mode:
-        _trainer.train(accelerator)
+
+    if args.training_dataset is not None:
+        train_loader, _ = data_handler.DataloaderFactory.get_dataloader(dataname=args.training_dataset, args=args)
     else:
-        _trainer.export_checkpoint(accelerator)
-
+        train_loader = None
     model =_trainer.model
+    _trainer.train(accelerator, train_loader)
 
-    if not args.export_mode:
-        # save model
-        save_dir = f'trained_models/{args.trainer}'
-        check_log_dir(save_dir)
+    # save model
+    save_dir = f'trained_models/{args.trainer}'
+    check_log_dir(save_dir)
 
-        groupname = [_g[0] for _g in args.trainer_group]
-        groupname = "".join(groupname)
-        filename = f'{args.date}_{groupname}'
-        torch.save(model, os.path.join(save_dir, f'{filename}.pt'))
+    groupname = [_g[0] for _g in args.trainer_group]
+    groupname = "".join(groupname)
+    filename = f'{args.date}_{groupname}'
+    torch.save(model, os.path.join(save_dir, f'{filename}.pt'))
         
     # Get the required model
 
