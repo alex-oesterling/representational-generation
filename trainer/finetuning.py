@@ -58,7 +58,7 @@ from diffusers import (
     UNet2DConditionModel,
 )
 from diffusers import StableDiffusionPipeline, UNet2DConditionModel
-
+# 
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel
 from diffusers.utils.torch_utils import is_compiled_module
@@ -69,8 +69,9 @@ from peft.utils import get_peft_model_state_dict
 
 # you MUST import torch before insightface
 # otherwise onnxruntime, used by FaceAnalysis, can only use CPU
-from insightface.app import FaceAnalysis
+# from insightface.app import FaceAnalysis
 from copy import deepcopy
+from utils import get_current_device, AverageMeter, gpu_mem_usage
 
 my_timezone = pytz.timezone("Asia/Singapore")
 
@@ -107,15 +108,23 @@ class Trainer(GenericTrainer):
         if "boolean" in self.modelname:
             self.model_depth = int(self.modelname[7:])
         self.ver = self.args.finetuning_ver
+        self.temp = self.args.temp
+        self.n_cs = self.args.n_cs
+        self.eniac = self.args.eniac
+        self.cache_dir = '/n/holylabs/LABS/calmon_lab/Lab/diffusion_models'
 
     def _set_group_clfs(self, groups):
-        path = '/n/holyscratch01/calmon_lab/Lab/datasets/mpr_stuffs/'
+        path = '/n/holylabs/LABS/calmon_lab/Lab/datasets/mpr_stuffs/'
         self.group_classifier_dic = {}
         vision_encoder = networks.ModelFactory.get_model(modelname=self.args.vision_encoder)  
         self.group_classifier_dic['vision_encoder'] = vision_encoder
         self.group_classifier_dic['vision_encoder'].to(self.accelerator.device, dtype=self.weight_dtype)
         self.group_classifier_dic['vision_encoder'].requires_grad_(False)
         self.group_classifier_dic['vision_encoder'].eval()
+        if self.args.vision_encoder == 'CLIP':
+            # _, transform = clip.load("ViT-L/14", device= 'cpu')
+            self.clip_img_mean_for_group = torch.tensor([0.48145466, 0.4578275, 0.40821073]).reshape([-1,1,1]).to(self.accelerator.device, dtype=self.weight_dtype) # mean is based on range [0,1]
+            self.clip_img_std_for_group = torch.tensor([0.26862954, 0.26130258, 0.27577711]).reshape([-1,1,1]).to(self.accelerator.device, dtype=self.weight_dtype) # std is based on range [0,1]
 
         output_dim = 0
         for group in groups:
@@ -143,15 +152,31 @@ class Trainer(GenericTrainer):
                 continue
         self.output_dim = output_dim
 
+    def _make_cartesian(self, dataset):
+        dim = dataset.shape[1]
 
+        if isinstance(dataset, np.ndarray):
+            for d in range(2, self.model_depth + 1):
+                for idxs in itertools.combinations(range(dim), d):
+                    dataset = np.concatenate((dataset, np.prod(dataset[:, idxs], axis=1).reshape(-1, 1)), axis=1)
+        elif isinstance(dataset, torch.Tensor):
+            for d in range(2, self.model_depth + 1):
+                for idxs in itertools.combinations(range(dim), d):
+                    dataset = torch.cat((dataset, torch.prod(dataset[:, idxs], dim=1).unsqueeze(1)), dim=1)
+        else:
+            raise TypeError("Unsupported dataset type. Must be numpy array or torch tensor.")
+        
+        return dataset
+    
     def _load_model(self):
         # Load the model
         # Convert the data type of model weights to fp16 if required
 
         model = self.model
         self.tokenizer = CLIPTokenizer.from_pretrained(
-            model.name_or_path,
-            subfolder="tokenizer"
+            self.model.name_or_path,
+            subfolder="tokenizer",
+            cache_dir = self.cache_dir
             )
         self.text_encoder = model.text_encoder
         self.vae = model.vae
@@ -184,7 +209,8 @@ class Trainer(GenericTrainer):
         if self.args.train_text_encoder:
             self.eval_text_encoder = CLIPTextModel.from_pretrained(
                 self.model.name_or_path, 
-                subfolder="text_encoder", 
+                subfolder="text_encoder",
+                cache_dir = self.cache_dir
                 )
             self.eval_text_encoder.requires_grad_(False)
             self.eval_text_encoder.to(self.accelerator.device, dtype=self.weight_dtype)
@@ -230,27 +256,33 @@ class Trainer(GenericTrainer):
                 target_modules=["q_proj", "k_proj", "v_proj", "out_proj"],
             )
             self.text_encoder.add_adapter(text_lora_config)
-            text_encoder_lora_layers = list(filter(lambda p: p.requires_grad, self.text_encoder.parameters()))
-            # ensure that dtype is float32, even if rest of the model that isn't trained is loaded in fp16
-            for p in text_encoder_lora_layers:
+            text_encoder_lora_layers = {}
+            for name, param in self.text_encoder.named_parameters():
+                if param.requires_grad:
+                    text_encoder_lora_layers[name] = param
+            for name, p in text_encoder_lora_layers.items():
                 p.data = p.data.float()
 
-            for p in text_encoder_lora_layers:
+            for name, p in text_encoder_lora_layers.items():
                 torch.distributed.broadcast(p, src=0)
+
+            text_encoder_lora_layers = CustomModel(text_encoder_lora_layers)
+            # text_encoder_lora_layers = list(filter(lambda p: p.requires_grad, self.text_encoder.parameters()))
+            # ensure that dtype is float32, even if rest of the model that isn't trained is loaded in fp16
 
             self.text_encoder_lora_layers = text_encoder_lora_layers
                         
-            self.text_encoder_lora_ema = EMAModel(filter(lambda p: p.requires_grad, self.text_encoder.parameters()), decay=self.args.EMA_decay)
-            self.text_encoder_lora_ema.to(self.accelerator.device)
+            # self.text_encoder_lora_ema = EMAModel(filter(lambda p: p.requires_grad, self.text_encoder.parameters()), decay=self.args.EMA_decay)
+            # self.text_encoder_lora_ema.to(self.accelerator.device)
 
             # print to check whether text_encoder lora & ema is identical across processes
-            print(f"{self.accelerator.device}; TE lora init to: {self.text_encoder_lora_layers[0].flatten()[1]:.6f}; TE lora ema init to: {self.text_encoder_lora_ema.shadow_params[0].flatten()[1]:.6f}")
+            # print(f"{self.accelerator.device}; TE lora init to: {self.text_encoder_lora_layers[0].flatten()[1]:.6f}; TE lora ema init to: {self.text_encoder_lora_ema.shadow_params[0].flatten()[1]:.6f}")
 
     def _set_optimizer(self):
         if self.args.train_text_encoder and self.args.train_unet:
             params_to_optimize = self.unet_lora_layers + self.text_encoder_lora_layers
         elif self.args.train_text_encoder and not self.args.train_unet:
-            params_to_optimize = self.text_encoder_lora_layers
+            params_to_optimize = self.text_encoder_lora_layers.parameters()
         elif not self.args.train_text_encoder and self.args.train_unet:
             # params_to_optimize = unet_lora_layers.parameters()
             params_to_optimize = self.unet_lora_layers
@@ -290,9 +322,11 @@ class Trainer(GenericTrainer):
         
         clip_image_processoor = CLIPImageProcessor.from_pretrained(
             "laion/CLIP-ViT-H-14-laion2B-s32B-b79K",
+            cache_dir = self.cache_dir
         )
         self.clip_vision_model_w_proj = CLIPVisionModelWithProjection.from_pretrained(
             "laion/CLIP-ViT-H-14-laion2B-s32B-b79K",
+            cache_dir = self.cache_dir
         )
         self.clip_vision_model_w_proj.vision_model.to(self.accelerator.device, dtype=self.weight_dtype)
         self.clip_vision_model_w_proj.visual_projection.to(self.accelerator.device, dtype=self.weight_dtype)
@@ -353,8 +387,9 @@ class Trainer(GenericTrainer):
 
         # set the accelerator to use the model
         if self.args.train_text_encoder:
-            self.text_encoder_lora_layers, self.text_encoder_lora_ema = self.accelerator.prepare(self.text_encoder_lora_layers, self.text_encoder_lora_ema)
-            self.accelerator.register_for_checkpointing(self.text_encoder_lora_ema)
+            # self.text_encoder_lora_layers, self.text_encoder_lora_ema = self.accelerator.prepare(self.text_encoder_lora_layers, self.text_encoder_lora_ema)
+            self.text_encoder_lora_layers = self.accelerator.prepare(self.text_encoder_lora_layers)
+            # self.accelerator.register_for_checkpointing(self.text_encoder_lora_ema)
         if self.args.train_unet:
             self.unet_lora_layers, self.unet_lora_ema = self.accelerator.prepare(self.unet_lora_layers, self.unet_lora_ema)
             self.accelerator.register_for_checkpointing(self.unet_lora_ema)
@@ -394,33 +429,43 @@ class Trainer(GenericTrainer):
 #                param.data = param.data.float()
 
         # Potentially load in the weights and states from a previous save
-        # if self.args.resume_from_checkpoint:
+        if self.args.resume_from_checkpoint:
 
-        #     if not os.path.exists(self.args.resume_from_checkpoint):
-        #         self.accelerator.print(
-        #             f"Checkpoint '{self.args.resume_from_checkpoint}' does not exist. Starting a new training run."
-        #         )
-        #         self.args.resume_from_checkpoint = None
-        #     else:
-        #         self.accelerator.print(f"Resuming from checkpoint {self.args.resume_from_checkpoint}")
-        #         self.accelerator.load_state(self.args.resume_from_checkpoint)
-        #         self.global_step = int(os.path.basename(self.args.resume_from_checkpoint).split("-")[1])
+            if not os.path.exists(self.args.resume_from_checkpoint):
+                self.accelerator.print(
+                    f"Checkpoint '{self.args.resume_from_checkpoint}' does not exist. Starting a new training run."
+                )
+                self.args.resume_from_checkpoint = None
+            else:
+                self.accelerator.print(f"Resuming from checkpoint {self.args.resume_from_checkpoint}")
+                for param in self.text_encoder_lora_layers:
+                    print(param.norm())
+                self.accelerator.load_state(self.args.resume_from_checkpoint)
+                print('after loading')
+                for param in self.text_encoder_lora_layers:
+                    print(param.norm())
+                self.global_step = int(os.path.basename(self.args.resume_from_checkpoint).split("-")[1])
 
-        #         resume_global_step = self.global_step
-        #         first_epoch = self.global_step // self.args.num_update_steps_per_epoch
-        #         resume_step = resume_global_step % (self.args.num_update_steps_per_epoch)
-                
-        #         if self.args.train_text_encoder:
-        #             self.text_encoder_lora_ema.to(self.accelerator.device)
+                resume_global_step = self.global_step
+                first_epoch = self.global_step // self.args.num_update_steps_per_epoch
+                resume_step = resume_global_step % (self.args.num_update_steps_per_epoch)
+                # self.model.load_lora_weights(self.args.resume_from_checkpoint)
+                # self.text_encoder_lora_layers = []
+                # for name, param in self.model.text_encoder.named_parameters():
+                    # self.text_encoder_lora_layers.append(param)
+                        # param.data = param.data.float()
+                # if self.args.train_text_encoder:
+                    # self.text_encoder.load_lora_weights(self.args.resume_from_checkpoint)
+                    # self.text_encoder_lora_ema.to(self.accelerator.device)
                     
-        #             # need to recreate text_encoder_lora_ema_dict
-        #             text_encoder_lora_ema_dict = {}
-        #             for name, shadow_param in itertools.zip_longest(text_encoder_lora_params_name_order, self.text_encoder_lora_ema.shadow_params):
-        #                 text_encoder_lora_ema_dict[name] = shadow_param
-        #             assert text_encoder_lora_ema_dict.__len__() == text_encoder_lora_dict.__len__(), "length does not match! something wrong happened while converting lora params to a state dict."
+                    # # need to recreate text_encoder_lora_ema_dict
+                    # text_encoder_lora_ema_dict = {}
+                    # for name, shadow_param in itertools.zip_longest(text_encoder_lora_params_name_order, self.text_encoder_lora_ema.shadow_params):
+                    #     text_encoder_lora_ema_dict[name] = shadow_param
+                    # assert text_encoder_lora_ema_dict.__len__() == text_encoder_lora_dict.__len__(), "length does not match! something wrong happened while converting lora params to a state dict."
                 
-        #         if self.args.train_unet:
-        #             unet_lora_ema.to(self.accelerator.device)
+                if self.args.train_unet:
+                    self.unet_lora_ema.to(self.accelerator.device)
 
         # Only show the progress bar once on each machine.
         progress_bar = tqdm(range(self.global_step, self.args.max_train_steps), disable=not self.accelerator.is_local_main_process)
@@ -428,14 +473,20 @@ class Trainer(GenericTrainer):
         self.wandb_tracker = self.accelerator.get_tracker("wandb", unwrap=True)
 
         curation_set = get_curation_set(self.args)
+        if self.eniac:
+            curation_set = np.array(([[-1,1]]))
+
         self.curation_set = curation_set
+        if "boolean" in self.args.functionclass:
+            curation_set = self._make_cartesian(curation_set)
         curation_set_tensor = torch.tensor(curation_set, dtype=self.weight_dtype, device=self.accelerator.device)
         mpr_set = {}
         self.oracle_function_set = {}
         for epoch in range(first_epoch, self.args.num_train_epochs):
             #torch.zeros([len(train_dataloader_idxs[0])*self.args.mpr_num_batches, self.args.num_group_attributes], dtype=self.weight_dtype, device=self.accelerator.device)
             for step, data_idx in enumerate(train_dataloader_idxs[epoch]):
-                
+                if accelerator.is_main_process:
+                    print("At start, mam mem: {:.1f} GB ".format(gpu_mem_usage()))
                 # Skip steps until we reach the resumed step
                 if self.args.resume_from_checkpoint and epoch == first_epoch and step < resume_step:
                     progress_bar.update(1)
@@ -467,7 +518,7 @@ class Trainer(GenericTrainer):
                 if self.accelerator.is_main_process:
                     now = datetime.now(my_timezone)
                     self.accelerator.print(
-                        f"{now.strftime('%Y/%m/%d - %H:%M:%S')} --- epoch: {epoch}, step: {step}, prompt: {prompt_i}\n" +
+                        f"{now.strftime('%Y/%m/%d - %H:%M:%S')} --- epoch: {epoch}, step: {step}, global_step: {self.global_step}, prompt: {prompt_i}\n" +
                         " ".join([f"\tprocess idx: {idx}; noise: {noises_i_all[idx].flatten()[-1].item():.4f};" for idx in range(len(noises_i_all))])
                         )
                 
@@ -511,8 +562,11 @@ class Trainer(GenericTrainer):
                             mpr_set[prompt_i] = probs_group ## probs_attributes is a tensor of shape [num_faces, num_group_attributes]
                         else:
                             mpr_set[prompt_i] = torch.cat([mpr_set[prompt_i], probs_group], dim=0)
+                        
+                        ## remove the oldest batch if the number of faces detected exceeds the number of faces that can be stored
                         if mpr_set[prompt_i].shape[0] >= self.args.mpr_num_batches*noises_i.shape[0]:
-                            mpr_set[prompt_i] = mpr_set[prompt_i][-self.args.mpr_num_batches*noises_i.shape[0]:] ## remove the oldest batch
+                            mpr_set[prompt_i] = mpr_set[prompt_i][-self.args.mpr_num_batches*noises_i.shape[0]:] 
+                        print(f'the size of mpr_set for {prompt_i} is :', mpr_set[prompt_i].size())
 
                     face_feats = torch.ones([aligned_face_chips.shape[0],512], dtype=self.weight_dtype_high_precision, device=aligned_face_chips.device) * (-1)
                     if sum(face_indicators)>0:
@@ -523,39 +577,20 @@ class Trainer(GenericTrainer):
 
                     face_indicators_all, face_indicators_others = customized_all_gather(face_indicators, self.accelerator, return_tensor_other_processes=True)
                     self.accelerator.print(f"\tNum faces detected: {face_indicators_all.sum().item()}/{face_indicators_all.shape[0]}.")
+                    if face_indicators_all.sum().item() == 0:
+                        continue
                     
                     images_all = customized_all_gather(images, self.accelerator, return_tensor_other_processes=False)
                     face_bboxs_all = customized_all_gather(face_bboxs, self.accelerator, return_tensor_other_processes=False)
                     preds_group_all = customized_all_gather(preds_group, self.accelerator, return_tensor_other_processes=False)
                     probs_group_all = customized_all_gather(probs_group, self.accelerator, return_tensor_other_processes=False)
-                    # face_real_scores_all = customized_all_gather(face_real_scores, self.accelerator, return_tensor_other_processes=False)
-                    # if self.accelerator.is_main_process:
-                        # if step % self.args.train_plot_every_n_iter == 0:
-                            # save_to = os.path.join(self.args.imgs_save_dir, f"train-{self.global_step}_generated.jpg")
-                            # # plot_in_grid(images_all, save_to, face_indicators=face_indicators_all, face_bboxs=face_bboxs_all, preds_gender=preds_group_all, pred_class_probs_gender=probs_group_all.max(dim=-1).values)
-                            # plot_in_grid(images_all, save_to, face_indicators=face_indicators_all, face_bboxs=face_bboxs_all, preds_group=preds_group_all, probs_group=probs_group_all, group=self.args.trainer_group)
-                            # log_imgs_i["img_generated"] = [save_to]
 
                     if self.accelerator.is_main_process:
                         probs_tmp = probs_group_all[(probs_group_all!=-1).all(dim=-1)]
                         logs_i["mpr"], _ = getMPR(self.args.trainer_group, mpr_set[prompt_i].cpu().numpy(), 
-                                                curation_set=curation_set, 
+                                                curation_set=self.curation_set, 
                                                 modelname=self.modelname, 
                                                 normalize=self.args.normalize)                        
-
-                    ################################################
-                    # Step 2: generate dynamic targets 
-                    # also broadcast from process idx 0, just in case targets_all computed might be different on different processes
-                    # TO DO : skip
-
-                    # targets_all, uncertainty_all = self.generate_dynamic_targets(probs_gender_all, w_uncertainty=True)
-                    # torch.distributed.broadcast(targets_all, src=0)
-                    # torch.distributed.broadcast(uncertainty_all, src=0)
-
-                    # targets_all[uncertainty_all>self.args.uncertainty_threshold] = -1
-                    # targets = targets_all[probs_group.shape[0]*(self.accelerator.local_process_index):probs_group.shape[0]*(self.accelerator.local_process_index+1)]
-                    # uncertainty = uncertainty_all[probs_group.shape[0]*(self.accelerator.local_process_index):probs_group.shape[0]*(self.accelerator.local_process_index+1)]
-                    # self.accelerator.print(f"\tNum faces to compute grads: {(targets_all!=-1).sum().item()}/{targets_all.shape[0]}")
 
                     ################################################
                     # Step 3: generate all original images using the original diffusion model
@@ -597,30 +632,28 @@ class Trainer(GenericTrainer):
                             concat_face_bboxs = torch.cat((face_bboxs_ori_all, face_bboxs_all), dim=0)
                             concat_preds_group = torch.cat((preds_group_ori_all, preds_group_all), dim=0)
                             concat_probs_group = torch.cat((probs_group_ori_all, probs_group_all), dim=0)
-                            save_to = os.path.join(self.args.imgs_save_dir, f"train-{self.global_step}_concat.jpg")
+                            save_to = os.path.join(self.args.imgs_save_dir, f"train-{self.global_step}_concat.png")
                             plot_in_grid(concat_images, save_to, face_indicators=concat_face_indicators, face_bboxs=concat_face_bboxs, preds_group=concat_preds_group, probs_group=concat_probs_group, group=self.args.trainer_group)
 
                             log_imgs_i["img_concat"] = [save_to]
 
-                            # save_to = os.path.join(self.args.imgs_save_dir, f"train-{self.global_step}_ori.jpg")
-                            # plot_in_grid(images_ori_all, save_to, face_indicators=face_indicators_ori_all, face_bboxs=face_bboxs_ori_all, preds_group=preds_group_ori_all, probs_group=probs_group_ori_all, group=self.args.trainer_group)
-
-                            # log_imgs_i["img_ori"] = [save_to]
-                
                 ################################################
                 # Step 4: compute loss
                 loss_fair_i = torch.ones(noises_i.shape, dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
-                # loss_face_i = torch.ones(noises_i.shape, dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
                 loss_CLIP_i = torch.ones(noises_i.shape[0], dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
                 loss_DINO_i = torch.ones(noises_i.shape[0], dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
                 loss_i = torch.ones(noises_i.shape[0], dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
                 
                 idxs_i = list(range(noises_i.shape[0]))
                 N_backward = math.ceil(noises_i.shape[0] / self.args.train_GPU_batch_size)
+                if self.accelerator.is_main_process:
+                    print("Before step 4, mam mem: {:.1f} GB ".format(gpu_mem_usage()))
+
                 for j in range(N_backward):
+                    if face_indicators[j*self.args.train_GPU_batch_size:(j+1)*self.args.train_GPU_batch_size].sum().item() == 0:
+                        continue
                     idxs_ij = idxs_i[j*self.args.train_GPU_batch_size:(j+1)*self.args.train_GPU_batch_size]
                     noises_ij = noises_i[idxs_ij]
-                    # targets_ij = targets[idxs_ij]
                     clip_feats_ori_ij = clip_feats_ori[idxs_ij]
                     DINO_feats_ori_ij = DINO_feats_ori[idxs_ij]
                     preds_group_ori_ij = preds_group_ori[idxs_ij]
@@ -631,8 +664,13 @@ class Trainer(GenericTrainer):
                     images_ij = self.generate_image_w_gradient(prompt_i, noises_ij, num_denoising_steps, which_text_encoder=self.text_encoder, which_unet=self.unet)
                     face_indicators_ij, face_bboxs_ij, face_chips_ij, face_landmarks_ij, aligned_face_chips_ij = get_face(images_ij, self.args)
                     
-                    if face_indicators_ij.sum().item() == 0:
-                        continue
+                        # detached_images = images_ij.detach()
+                        # face_indicators_ij.detach()
+                        # face_bboxs_ij.detach()
+                        # face_chips_ij.detach()
+                        # face_landmarks_ij.detach()
+                        # aligned_face_chips_ij.detach()
+                        # continue
                     
                     preds_group_ij, probs_group_ij = self._get_group_predictions(face_chips_ij, selector=face_indicators_ij, fill_value=-1)
                     # print(f" in line 672 , the size of probs_group_ij is {probs_group_ij.size()}")
@@ -644,77 +682,63 @@ class Trainer(GenericTrainer):
 
                     loss_CLIP_ij = - (clip_feats_ij * clip_feats_ori_ij).sum(dim=-1) + 1
                     loss_DINO_ij = - (DINO_feats_ij * DINO_feats_ori_ij).sum(dim=-1) + 1
+                    if face_indicators_ij.sum().item() != 0:
+                        probs_group_ij = 2 * probs_group_ij - 1
+                        mpr_set_with_gradients = mpr_set[prompt_i].clone()
+                        # print(probs_group_ij.shape)
+                        # print(mpr_set_with_gradients[-n_faces_detected:])
+                        ## insert computation graph for attributes for batch i, device j 
+                        mpr_set_with_gradients[-noises_i.shape[0]:][j*self.args.train_GPU_batch_size:(j+1)*self.args.train_GPU_batch_size] = probs_group_ij 
 
-                    # TO DO
-                    # loss_fair_ij = torch.ones(len(idxs_ij), dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
-                    # idxs_w_face_loss = ((face_indicators_ij == True) * (targets_ij != -1)).nonzero().view([-1])
-                    # loss_fair_ij_w_face_loss = CE_loss(logits_gender_ij[idxs_w_face_loss], targets_ij[idxs_w_face_loss])
-                    # loss_fair_ij[idxs_w_face_loss] = loss_fair_ij_w_face_loss
-                    
-                    # oracle_function_ = oracle_function(np.ones(mpr_set[prompt_i].shape[0]), mpr_set[prompt_i].cpu().numpy(), curation_set, modelname=self.modelname)
-                    # oracle_function_ = torch.tensor(oracle_function_, dtype=self.weight_dtype, device=self.accelerator.device) ##compute oracle over detached gradients precomputed
+                        loss_fair_ij = 0
+                        if self.modelname == "linear" or "boolean" in self.modelname:
+                            # compute oracle
+                            generative_set_no_grad = mpr_set[prompt_i]
+                            generative_set_no_grad = generative_set_no_grad[(generative_set_no_grad!=-3).all(dim=-1)]
+                            generative_set_grad = mpr_set_with_gradients[(mpr_set_with_gradients!=-3).all(dim=-1)]
+                            if "boolean" in self.modelname:
+                                generative_set_no_grad = self._make_cartesian(generative_set_no_grad)
+                                generative_set_grad = self._make_cartesian(generative_set_grad)
+                            if self.ver == "ver1" or self.ver == "ver3":
+                                with torch.no_grad():
+                                    generative_set = generative_set_no_grad
+                                    mean_left = generative_set.mean(dim=0)
+                                    mean_right = curation_set_tensor.mean(dim=0)
+                                    diff = mean_left - mean_right
+                                    _oracle = diff / (torch.norm(diff, p=2))
 
-                    probs_group_ij = 2 * probs_group_ij - 1
-                    mpr_set_with_gradients = deepcopy(mpr_set[prompt_i])
-                    # print(probs_group_ij.shape)
-                    # print(mpr_set_with_gradients[-n_faces_detected:])
-                    ## insert computation graph for attributes for batch i, device j
-                    mpr_set_with_gradients[-noises_i.shape[0]:][j*self.args.train_GPU_batch_size:(j+1)*self.args.train_GPU_batch_size] = probs_group_ij 
+                            elif self.ver == "ver2":
+                                generative_set = generative_set_grad
+                                mean_left = generative_set.mean(dim=0)
+                                mean_right = curation_set_tensor.mean(dim=0)
+                                diff = mean_left - mean_right
+                                _oracle = diff / (torch.norm(diff, p=2))
 
+                            # compute MPR
+                            mean_left = generative_set_grad.mean(dim=0) if (self.ver == "ver1" or self.ver == "ver3") else mean_left
+                            if self.ver == "ver1" or self.ver== "ver3":
+                                if j == 0:
+                                    if len(self.oracle_function_set[prompt_i]) == self.n_cs:   
+                                        self.oracle_function_set[prompt_i].pop(0)
+                                    self.oracle_function_set[prompt_i].append(_oracle.detach().clone())
+                                else:
+                                    self.oracle_function_set[prompt_i][-1] = _oracle.detach().clone()
+                                    
+                                print(f'the size of oracle_function_set for {prompt_i} is :', len(self.oracle_function_set[prompt_i]))
+                                for _oracle in self.oracle_function_set[prompt_i]:
+                                    _tmp_mpr = torch.abs((mean_left - mean_right) @ _oracle.detach())
+                                    loss_fair_ij += _tmp_mpr
+                                    # loss_fair_ij += torch.abs(torch.sum((1/k)*c[:generative_set.shape[0]]) - torch.sum((1/m)*c[generative_set.shape[0]:]))
+                                loss_fair_ij /= len(self.oracle_function_set[prompt_i])
+                            
+                            elif self.ver == "ver2":
+                                loss_fair_ij = torch.abs((mean_left - mean_right) @ _oracle)
+                    else:
+                        loss_fair_ij = torch.tensor(0, dtype=self.weight_dtype, device=self.accelerator.device)
 
-                    loss_fair_ij = 0
-                    if self.modelname == "linear" or "boolean" in self.modelname:
-                        # compute oracle
-                        generative_set_no_grad = mpr_set[prompt_i]
-                        generative_set_no_grad = generative_set_no_grad[(generative_set_no_grad!=-3).all(dim=-1)]
-                        generative_set_grad = mpr_set_with_gradients[(mpr_set_with_gradients!=-3).all(dim=-1)]
-                        if self.ver == "ver1":
-                            generative_set = generative_set_no_grad
-                        elif self.ver == "ver2":
-                            generative_set = generative_set_grad
-                        mean_left = generative_set.mean(dim=0)
-                        mean_right = curation_set_tensor.mean(dim=0)
-                        diff = mean_left - mean_right
-                        _oracle = diff / (torch.norm(diff, p=2))
-
-                        # compute MPR
-                        mean_left = generative_set_grad.mean(dim=0) if self.ver == "ver1" else mean_left
-                        if self.ver == "ver1":
-                            if j == 0:
-                                if len(self.oracle_function_set[prompt_i]) == 32:   
-                                    self.oracle_function_set[prompt_i].pop(0)
-                                self.oracle_function_set[prompt_i].append(_oracle)
-                            else:
-                                self.oracle_function_set[prompt_i][-1] = _oracle
-                                
-                            for _oracle in self.oracle_function_set[prompt_i]:
-                                _tmp_mpr = torch.abs((mean_left - mean_right) @ _oracle)
-                                loss_fair_ij += _tmp_mpr
-                                # loss_fair_ij += torch.abs(torch.sum((1/k)*c[:generative_set.shape[0]]) - torch.sum((1/m)*c[generative_set.shape[0]:]))
-                            loss_fair_ij /= len(self.oracle_function_set[prompt_i])
-                        
-                        elif self.ver == "ver2":
-                            loss_fair_ij = torch.abs((mean_left - mean_right) @ _oracle)
-
-                    # loss_face_ij = torch.ones(len(idxs_ij), dtype=self.weight_dtype, device=self.accelerator.device) *(-1)
-
-                    # idxs_w_face_feats_from_ori = ((face_indicators_ij==True) * (targets_ij!=-1) * (targets_ij==preds_gender_ori_ij) * (probs_gender_ori_ij.max(dim=-1).values>=self.args.face_gender_confidence_level)).nonzero().view([-1]).tolist()
-                    # idxs_w_face_feats_from_ori = ((face_indicators_ij==True) * (targets_ij==preds_gender_ori_ij) * (probs_gender_ori_ij.max(dim=-1).values>=self.args.face_gender_confidence_level)).nonzero().view([-1]).tolist()
-                    # if len(idxs_w_face_feats_from_ori)>0:
-                    #     face_feats_1 = get_face_feats(self.face_feats_net, aligned_face_chips_ij[idxs_w_face_feats_from_ori])
-                    #     face_feats_target_1 = face_feats_ori_ij[idxs_w_face_feats_from_ori]
-                    #     loss_face_ij[idxs_w_face_feats_from_ori] = (1 - (face_feats_1*face_feats_target_1).sum(dim=-1)).to(loss_face_ij.dtype)
-                    
-                    # idxs_w_face_feats_from_search = list(set(((face_indicators_ij==True) * (targets_ij!=-1) ).nonzero().view([-1]).tolist()) - set(idxs_w_face_feats_from_ori))
-                    # if len(idxs_w_face_feats_from_search)>0:
-                    #     face_feats_2 = get_face_feats(self.face_feats_net, aligned_face_chips_ij[idxs_w_face_feats_from_search])
-                    #     face_feats_target_2 = self.face_feats_model.semantic_search(face_feats_2, face_indicators_ij[idxs_w_face_feats_from_search])
-                    #     loss_face_ij[idxs_w_face_feats_from_search] = (1 - (face_feats_2*face_feats_target_2).sum(dim=-1)).to(loss_face_ij.dtype)
-
-                    # dynamic_weights = self.gen_dynamic_weights(face_indicators_ij, targets_ij, preds_gender_ori_ij, probs_gender_ori_ij, factor=self.args.factor1)
-                    # loss_ij = loss_mpr_ij + self.args.weight_loss_img * dynamic_weights * (loss_CLIP_ij + loss_DINO_ij) + self.args.weight_loss_face * loss_face_ij
                     loss_ij = loss_fair_ij + self.args.weight_loss_img * (loss_CLIP_ij + loss_DINO_ij).mean() 
-                    print(loss_fair_ij)
+                    # if self.accelerator.is_main_process:
+                        # print(f"Right before backward of {j}-batch, mem: {gpu_mem_usage():.1f} GB ")
                     self.accelerator.backward(loss_ij)
 
                     with torch.no_grad():
@@ -724,6 +748,10 @@ class Trainer(GenericTrainer):
                         loss_CLIP_i[idxs_ij] = loss_CLIP_ij.to(loss_CLIP_i.dtype)
                         loss_DINO_i[idxs_ij] = loss_DINO_ij.to(loss_DINO_i.dtype)
                         loss_i[idxs_ij] = loss_ij.to(loss_i.dtype)
+                    
+                    if self.accelerator.is_main_process:
+                        print(f"After backward of {j}-batch, mam mem: {gpu_mem_usage():.1f} GB ")
+
                         
                 # for logging purpose, gather all losses to main_process
                 self.accelerator.wait_for_everyone()
@@ -732,10 +760,6 @@ class Trainer(GenericTrainer):
                 loss_CLIP_all = customized_all_gather(loss_CLIP_i, self.accelerator)
                 loss_DINO_all = customized_all_gather(loss_DINO_i, self.accelerator)
                 loss_all = customized_all_gather(loss_i, self.accelerator)
-
-                # loss_all = loss_all[loss_all!=-1]
-                # loss_fair_all = loss_fair_all[loss_fair_all!=-1]
-                # loss_face_all = loss_face_all[loss_face_all!=-1]
 
                 if self.accelerator.is_main_process:
                     # logs_i["loss_fair"].append(loss_fair_all)
@@ -766,14 +790,14 @@ class Trainer(GenericTrainer):
                         else:
                             self.wandb_tracker.log({f"train_{key}": values.mean().item()}, step=self.global_step)
 
-                    for key, values in log_imgs_i.items():
-                        self.wandb_tracker.log({f"train_{key}":wandb.Image(
-                                data_or_path=values[0],
-                                caption=prompt_i,
-                            )
-                            },
-                            step=self.global_step
-                            )
+              #      for key, values in log_imgs_i.items():
+              #          self.wandb_tracker.log({f"train_{key}":wandb.Image(
+              #                  data_or_path=values[0],
+              #                  caption=prompt_i,
+              #              )
+              #              },
+              #              step=self.global_step
+              #              )
 
                 if self.args.train_text_encoder:
                     self.model_sanity_print(self.text_encoder_lora_layers, "check No.1, text_encoder: after self.accelerator.backward()")
@@ -786,7 +810,7 @@ class Trainer(GenericTrainer):
                 grad_is_finite = True
                 with torch.no_grad():
                     if self.args.train_text_encoder:
-                        for p in self.text_encoder_lora_layers:
+                        for p in self.text_encoder_lora_layers.parameters():
                             if not torch.isfinite(p.grad).all():
                                 grad_is_finite = False
                             torch.distributed.all_reduce(p.grad, torch.distributed.ReduceOp.SUM)
@@ -807,81 +831,90 @@ class Trainer(GenericTrainer):
                     self.optimizer.step()
                 else:
                     self.accelerator.print(f"grads are not finite, skipped!")
-                
-                self.lr_scheduler.step()
-                
-                if grad_is_finite:
-                    if self.args.train_text_encoder:
-                        self.text_encoder_lora_ema.step(self.text_encoder_lora_layers)
-                    if self.args.train_unet:
-                        self.unet_lora_ema.step(self.unet_lora_layers )
-
-                progress_bar.update(1)
-                self.global_step += 1
-
+            
                 if self.accelerator.is_main_process:
-                    with torch.no_grad():
-                        if self.args.train_text_encoder:
-                            param_norm = np.mean([p.norm().item() for p in self.text_encoder_lora_layers])
-                            param_ema_norm = np.mean([p.norm().item() for p in self.text_encoder_lora_ema.shadow_params])
-                            self.wandb_tracker.log({f"train_TE_lora_norm": param_norm}, step=self.global_step)
-                            self.wandb_tracker.log({f"train_TE_lora_ema_norm": param_ema_norm}, step=self.global_step)
-                        if self.args.train_unet:
-                            param_norm = np.mean([p.norm().item() for p in self.unet_lora_layers])
-                            param_ema_norm = np.mean([p.norm().item() for p in self.unet_lora_ema.shadow_params])
-                            self.wandb_tracker.log({f"train_unet_lora_norm": param_norm}, step=self.global_step)
-                            self.wandb_tracker.log({f"train_unet_lora_ema_norm": param_ema_norm}, step=self.global_step)
-
-                if self.global_step % self.args.evaluate_every_n_iter == 0:
-                    self.evaluation_step(prompts_val, self.global_step)
-
-                if self.accelerator.is_main_process:
-                    if self.global_step % self.args.checkpointing_steps == 0:
-                        # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
-                        if self.args.checkpoints_total_limit is not None:
-                            name = "checkpoint_tmp"
-                            clean_checkpoint(self.args.ckpts_save_dir, name, self.args.checkpoints_total_limit)
-
-                        save_path = os.path.join(self.args.ckpts_save_dir, f"checkpoint_tmp-{self.global_step}")
-                        self.accelerator.save_state(save_path)
+                    print(f"After gradient steps, mam mem: {gpu_mem_usage():.1f} GB ")
+                    self.lr_scheduler.step()
                     
-                        logger.info(f"Accelerator checkpoint saved to {save_path}")
+                    if grad_is_finite:
+                        # if self.args.train_text_encoder:
+                            # self.text_encoder_lora_ema.step(self.text_encoder_lora_layers)
+                        if self.args.train_unet:
+                            self.unet_lora_ema.step(self.unet_lora_layers )
 
-                    if self.global_step % self.args.checkpointing_steps_long == 0:
-                        # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
+                    progress_bar.update(1)
+                    # self.global_step += 1
 
-                        save_path = os.path.join(self.args.ckpts_save_dir, f"checkpoint-{self.global_step}")
-                        self.accelerator.save_state(save_path)
-                                                
-                        unet_state_dict = None
-                        if self.args.train_unet:    
-                            unwrapped_model = self.unwrap_model(self.unet)
-                            unet_state_dict = convert_state_dict_to_diffusers(
-                                get_peft_model_state_dict(unwrapped_model)
-                            )
-                        text_encoder_state_dict = None
-                        if self.args.train_text_encoder:
-                            unwrapped_model = self.unwrap_model(self.text_encoder)
-                            text_encoder_state_dict = convert_state_dict_to_diffusers(
-                                get_peft_model_state_dict(unwrapped_model)
-                            )
+                    if self.accelerator.is_main_process:
+                        with torch.no_grad():
+                            if self.args.train_text_encoder:
+                                param_norm = np.mean([p.norm().item() for p in self.text_encoder_lora_layers.parameters()])
+                                # param_ema_norm = np.mean([p.norm().item() for p in self.text_encoder_lora_ema.shadow_params])
+                                self.wandb_tracker.log({f"train_TE_lora_norm": param_norm}, step=self.global_step)
+                                # self.wandb_tracker.log({f"train_TE_lora_ema_norm": param_ema_norm}, step=self.global_step)
+                            if self.args.train_unet:
+                                param_norm = np.mean([p.norm().item() for p in self.unet_lora_layers])
+                                param_ema_norm = np.mean([p.norm().item() for p in self.unet_lora_ema.shadow_params])
+                                self.wandb_tracker.log({f"train_unet_lora_norm": param_norm}, step=self.global_step)
+                                self.wandb_tracker.log({f"train_unet_lora_ema_norm": param_ema_norm}, step=self.global_step)
+
+                    if self.global_step % self.args.evaluate_every_n_iter == 0:
+                        if self.global_step != 0:
+                            self.evaluation_step(prompts_val, self.global_step)
+
+                    if self.accelerator.is_main_process:
+                        # if self.global_step % self.args.checkpointing_steps == 0:
+                        #     # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
+                        #     if self.args.checkpoints_total_limit is not None:
+                        #         name = "checkpoint_tmp"
+                        #         clean_checkpoint(self.args.ckpts_save_dir, name, self.args.checkpoints_total_limit)
+
+                        #     save_path = os.path.join(self.args.ckpts_save_dir, f"checkpoint_tmp-{self.global_step}")
+                        #     self.accelerator.save_state(save_path)
                         
-                        StableDiffusionPipeline.save_lora_weights(
-                            save_directory=save_path,
-                            unet_lora_layers=unet_state_dict,
-                            text_encoder_lora_layers=text_encoder_state_dict,
-                            safe_serialization=True,
-                        )
+                        #     logger.info(f"Accelerator checkpoint saved to {save_path}")
 
-                        logger.info(f"Accelerator checkpoint saved to {save_path}")
+                        if self.global_step % self.args.checkpointing_steps_long == 0:
+                            # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
+                            
+                            save_path = os.path.join(self.args.ckpts_save_dir, f"checkpoint-{self.global_step}")
+                            self.accelerator.save_state(save_path)
+                                                    
+                            unet_state_dict = None
+                            if self.args.train_unet:    
+                                unwrapped_model = self.unwrap_model(self.unet)
+                                unet_state_dict = convert_state_dict_to_diffusers(
+                                    get_peft_model_state_dict(unwrapped_model)
+                                )
+                            text_encoder_state_dict = None
+                            if self.args.train_text_encoder:
+                                unwrapped_model = self.unwrap_model(self.text_encoder)
+                                
+                                text_encoder_state_dict = convert_state_dict_to_diffusers(
+                                    get_peft_model_state_dict(unwrapped_model)
+                                )
+                            
+                            StableDiffusionPipeline.save_lora_weights(
+                                save_directory=save_path,
+                                unet_lora_layers=unet_state_dict,
+                                text_encoder_lora_layers=text_encoder_state_dict,
+                                safe_serialization=True,
+                            )
+                            # for name, param in self.text_encoder.named_parameters():
+                                # print(name, param.norm().item())
+                            # torch.save(self.text_encoder.state_dict(), save_path+f"/text_encoder.pth")
+                            # torch.save(self.unet.state_dict(), save_path+f"/unet.pth")
+                            # torch.save(self.vae.state_dict(), save_path+f"/vae.pth")
 
-                torch.cuda.empty_cache()
+                            logger.info(f"Accelerator checkpoint saved to {save_path}")
+                    self.global_step += 1
+                    torch.cuda.empty_cache()
         self.accelerator.end_training()
     
         #######################################################
     
     @torch.no_grad()
-    def generate_image_no_gradient(self, prompt, noises, num_denoising_steps, which_text_encoder, which_unet):
+    def generate_image_no_gradient(self, prompt, noises, num_denoising_steps, which_text_encoder, which_unet, flag=False):
         """
         prompts: str
         noises: [N,4,64,64], N is number images to be generated for the prompt
@@ -916,14 +949,21 @@ class Trainer(GenericTrainer):
             uncond_input["attention_mask"],
         )
         negative_prompt_embeds = negative_prompt_embeds[0]
+        # if flag:
+        #     print('promopt embeds :', prompt_embeds)
 
         prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
         prompt_embeds = prompt_embeds.to(self.weight_dtype)
-        
+        # if flag:
+        #     print(self.noise_scheduler)
         self.noise_scheduler.set_timesteps(num_denoising_steps)
+        # if flag:
+        #     print(self.noise_scheduler.timesteps)
+
         latents = noises
         for i, t in enumerate(self.noise_scheduler.timesteps):
-        
+            # if flag:
+            #     print(t, ' latent : ', latents[0,:,30:32, 30:32])
             # scale model input
             latent_model_input = torch.cat([latents.to(self.weight_dtype)] * 2)
             latent_model_input = self.noise_scheduler.scale_model_input(latent_model_input, t)
@@ -934,14 +974,21 @@ class Trainer(GenericTrainer):
                 encoder_hidden_states=prompt_embeds,
             ).sample
             noises_pred = noises_pred.to(self.weight_dtype_high_precision)
+            # if flag:
+            #     print(t, ' noise pred : ', noises_pred[0,:,30:32, 30:32])
             
             noises_pred_uncond, noises_pred_text = noises_pred.chunk(2)
             noises_pred = noises_pred_uncond + self.args.guidance_scale * (noises_pred_text - noises_pred_uncond)
             
             latents = self.noise_scheduler.step(noises_pred, t, latents).prev_sample
 
+
         latents = 1 / self.vae.config.scaling_factor * latents
-        images = self.vae.decode(latents.to(self.vae.dtype)).sample.clamp(-1,1) # in range [-1,1]
+        # images = self.vae.decode(latents.to(self.vae.dtype)).sample.clamp(-1,1) # in range [-1,1]
+        images = self.vae.decode(latents.to(self.vae.dtype)).sample
+        # if flag:
+        #     print('generated images :', images[0, :,30:32, 30:32])
+        images = (images / 2 + 0.5).clamp(0,1)
         
         return images
     
@@ -1016,7 +1063,9 @@ class Trainer(GenericTrainer):
             latents = self.noise_scheduler.step(noises_pred, t, latents).prev_sample
 
         latents = 1 / self.vae.config.scaling_factor * latents
-        images = self.vae.decode(latents.to(self.vae.dtype)).sample.clamp(-1,1) # in range [-1,1]
+        # images = self.vae.decode(latents.to(self.vae.dtype)).sample.clamp(-1,1) # in range [-1,1]
+        images = self.vae.decode(latents.to(self.vae.dtype)).sample
+        images = (images / 2 + 0.5).clamp(0,1)
         
         return images
     
@@ -1032,7 +1081,7 @@ class Trainer(GenericTrainer):
         Returns:
             embeds (torch.tensor)
         """
-        images_preprocessed = ((images+1)*0.5 - self.clip_img_mean) / self.clip_img_std
+        images_preprocessed = (images - self.clip_img_mean) / self.clip_img_std
         embeds = self.clip_vision_model_w_proj(images_preprocessed).image_embeds
         
         if to_high_precision:
@@ -1052,7 +1101,7 @@ class Trainer(GenericTrainer):
         Returns:
             embeds (torch.tensor)
         """
-        images_preprocessed = ((images+1)*0.5 - self.dinov2_img_mean) / self.dinov2_img_std
+        images_preprocessed = (images - self.dinov2_img_mean) / self.dinov2_img_std
         embeds = self.dinov2(images_preprocessed)
         
         if to_high_precision:
@@ -1115,21 +1164,25 @@ class Trainer(GenericTrainer):
         self.evaluate_process(self.text_encoder, self.unet, "main", prompts_val, noises_val, current_step)
 
         # evaluate EMA as well
-        if self.args.train_text_encoder:
-            text_encoder_lora_layers = copy.deepcopy(self.text_encoder_lora_layers)
-            # load_state_dict_results = self.text_encoder.load_state_dict(self.text_encoder_lora_ema_dict, strict=False)
+        # if self.args.train_text_encoder:
+        #     text_encoder_lora_layers = copy.deepcopy(self.text_encoder_lora_layers)
+        #     # load_state_dict_results = self.text_encoder.load_state_dict(self.text_encoder_lora_ema_dict, strict=False)
         
-        if self.args.train_unet:
-            with torch.no_grad():
-                unet_lora_layers_copy = copy.deepcopy(self.unet_lora_layers)
-                for p, p_from in itertools.zip_longest(list(self.unet_lora_layers), self.unet_lora_ema.shadow_params):
-                    p.data = p_from.data
+        # if self.args.train_unet:
+        #     with torch.no_grad():
+        #         unet_lora_layers_copy = copy.deepcopy(self.unet_lora_layers)
+        #         for p, p_from in itertools.zip_longest(list(self.unet_lora_layers), self.unet_lora_ema.shadow_params):
+        #             p.data = p_from.data
 
     @torch.no_grad()
     def evaluate_process(self, which_text_encoder, which_unet, name, prompts, noises, current_global_step):
         logs = []
         log_imgs = []
         num_denoising_steps = 25
+
+        with open('tmp/noise_tmp.pkl', 'wb') as f:
+            pickle.dump(noises, f)
+
         for prompt_i, noises_i in itertools.zip_longest(prompts, noises):
             if self.accelerator.is_main_process:
                 logs_i = {
@@ -1152,7 +1205,6 @@ class Trainer(GenericTrainer):
             images_ori = torch.cat(images_ori)
             face_indicators_ori, face_bboxs_ori, face_chips_ori, face_landmarks_ori, aligned_face_chips_ori = get_face(images_ori, self.args)
             preds_group_ori, probs_group_ori = self._get_group_predictions(face_chips_ori, selector=face_indicators_ori, fill_value=-1)
-            # print('in line 1140 the size of probs_group_ori :', probs_group_ori.size())
             
             face_feats_ori = get_face_feats(self.face_feats_net, aligned_face_chips_ori)
             _, face_real_scores_ori = self.face_feats_model.semantic_search(face_feats_ori, selector=face_indicators_ori, return_similarity=True)
@@ -1165,7 +1217,7 @@ class Trainer(GenericTrainer):
             face_real_scores_ori_all = customized_all_gather(face_real_scores_ori, self.accelerator, return_tensor_other_processes=False)
 
             if self.accelerator.is_main_process:
-                save_to = os.path.join(self.args.imgs_save_dir, f"eval_{name}_{self.global_step}_{prompt_i}_ori.jpg")
+                save_to = os.path.join(self.args.imgs_save_dir, f"eval_{name}_{self.global_step}_{prompt_i}_ori.png")
                 plot_in_grid(
                     images_ori_all, 
                     save_to, 
@@ -1177,18 +1229,23 @@ class Trainer(GenericTrainer):
                 )
 
                 log_imgs_i["img_ori"] = [save_to]
-
             
             images = []
             N = math.ceil(noises_i.shape[0] / self.args.val_GPU_batch_size)
             for j in range(N):
                 noises_ij = noises_i[self.args.val_GPU_batch_size*j:self.args.val_GPU_batch_size*(j+1)]
+                # if j == 0:
+                #     print(f"the norm of noises_ij is {noises_ij[0].norm().item()}")
+                    # images_ij = self.generate_image_no_gradient(prompt_i, noises_ij, num_denoising_steps, which_text_encoder=which_text_encoder, which_unet=which_unet, flag=True)
+                # else:
                 images_ij = self.generate_image_no_gradient(prompt_i, noises_ij, num_denoising_steps, which_text_encoder=which_text_encoder, which_unet=which_unet)
                 images.append(images_ij)
             images = torch.cat(images)
             
-            face_indicators, face_bboxs, face_chips, face_landmarks, aligned_face_chips = get_face(images, self.args)
-            preds_group, probs_group = self._get_group_predictions(face_chips, selector=face_indicators, fill_value=-1)
+            face_indicators, face_bboxs, face_chips, face_landmarks, aligned_face_chips = get_face(images, self.args, eval=True)
+            # face_chips = ((face_chips*0.5 + 0.5) * 255).to(torch.uint8).to(self.weight_dtype)
+            
+            preds_group, probs_group = self._get_group_predictions(face_chips, selector=face_indicators, fill_value=-1, eval=True)
             # print('in line 1180 the size of probs :', probs_group.size())
             
             # face_feats = get_face_feats(self.face_feats_net, aligned_face_chips)
@@ -1201,8 +1258,11 @@ class Trainer(GenericTrainer):
             probs_group_all = customized_all_gather(probs_group, self.accelerator, return_tensor_other_processes=False)
             # face_real_scores = customized_all_gather(face_real_scores, self.accelerator, return_tensor_other_processes=False)
 
+            print("the number of face : ", face_indicators_all.sum())
+            # print which images don't have faces
             if self.accelerator.is_main_process:
-                save_to = os.path.join(self.args.imgs_save_dir, f"eval_{name}_{self.global_step}_{prompt_i}_generated.jpg")
+                tmp_prompt = prompt_i.replace(" ", "_")
+                save_to = os.path.join(self.args.imgs_save_dir, f"eval_{name}_{self.global_step}_{tmp_prompt}_generated.png")
                 plot_in_grid(
                     images_all, 
                     save_to, 
@@ -1210,17 +1270,62 @@ class Trainer(GenericTrainer):
                     face_bboxs=face_bboxs_all, 
                     preds_group=preds_group_all, 
                     probs_group=probs_group_all,
-                    group=self.args.trainer_group
-                    # face_real_scores=face_real_scores
+                    group=self.args.trainer_group,
+                    save_images=True
                     )
 
                 log_imgs_i["img_generated"] = [save_to]
             
+            # probs_tmp = probs_group_ori_all[(probs_group_ori_all!=-1).all(dim=-1)]
+            # tmp = probs_tmp[:,:2]
+            # entropy = -torch.sum(tmp * torch.log(tmp), dim=-1)
+            # print('original gender entropy :', torch.mean(entropy).item())
+            # tmp = probs_tmp[:,2:4]
+            # entropy = -torch.sum(tmp * torch.log(tmp), dim=-1)
+            # print('original age entropy :', torch.mean(entropy).item())
+            # tmp = probs_tmp[:,4:]
+            # entropy = -torch.sum(tmp * torch.log(tmp), dim=-1)
+            # print('original race entropy :', torch.mean(entropy).item())
+
+            # probs_tmp = probs_group_all[(probs_group_all!=-1).all(dim=-1)]
+            # tmp = probs_tmp[:,:2]
+            # entropy = -torch.sum(tmp * torch.log(tmp), dim=-1)
+            # print('gender entropy :', torch.mean(entropy).item())
+            # tmp = probs_tmp[:,2:4]
+            # entropy = -torch.sum(tmp * torch.log(tmp), dim=-1)
+            # print('age entropy :', torch.mean(entropy).item())
+            # tmp = probs_tmp[:,4:]
+            # entropy = -torch.sum(tmp * torch.log(tmp), dim=-1)
+            # print('race entropy :', torch.mean(entropy).item())
+
             if self.accelerator.is_main_process:
                 probs_tmp = probs_group_all[(probs_group_all!=-1).all(dim=-1)]
                 # gender_gap = (((probs_tmp[:,1]>=0.5)*(probs_tmp[:,1]<=1)).float().mean() - ((probs_tmp[:,1]>=0)*(probs_tmp[:,1]<=0.5)).float().mean()).item()
                 probs_tmp = 2 * probs_tmp - 1
+                with open(f"{self.args.imgs_save_dir}/probs_{name}_{self.global_step}_{prompt_i}.pkl", "wb") as f:
+                    pickle.dump(probs_tmp.cpu().numpy(), f)
+                
+                probs_01 = probs_tmp.cpu().numpy()*0.5 + 0.5
+                curation_01 = self.curation_set*0.5 + 0.5
+                probs_onehot, curation_onehot = [], []
+                for (p,p_new) in [(probs_01, probs_onehot), (curation_01,curation_onehot)]:
+                    pos = 0
+                    if len(self.args.trainer_group) == 3:
+                        for idx in [2,2,7]:
+                            tmp = p[:, pos:pos+idx] 
+                            one_hot_indices = np.argmax(tmp, axis=1)
+                            p_new.append(np.eye(tmp.shape[1])[one_hot_indices])
+                            pos += idx
+                    else:
+                        tmp = p
+                        one_hot_indices = np.argmax(tmp, axis=1)
+                        p_new.append(np.eye(tmp.shape[1])[one_hot_indices])
+                        # pos += idx
+                probs_onehot = np.concatenate(probs_onehot, axis=1)*2 - 1
+                curation_onehot = np.concatenate(curation_onehot, axis=1)*2 - 1
+
                 mpr = getMPR(self.args.trainer_group, probs_tmp.cpu().numpy(), curation_set=self.curation_set, modelname=self.modelname, normalize=self.args.normalize)[0]
+                mpr_onehot = getMPR(self.args.trainer_group, probs_onehot, curation_set=curation_onehot, modelname=self.modelname, normalize=self.args.normalize)[0]
                 
                 # # temporary debugging
                 # curation_set_tensor = torch.tensor(self.curation_set, dtype=self.weight_dtype, device=self.accelerator.device)
@@ -1241,6 +1346,7 @@ class Trainer(GenericTrainer):
 
                 # gender_pred_between_02_08 = ((probs_tmp[:,1]>=0.2)*(probs_tmp[:,1]<=0.8)).float().mean().item()
                 print(f'{prompt_i} MPR: {mpr}')
+                print(f'{prompt_i} MPR_onehot: {mpr_onehot}')
                 # print(f'{prompt_i} MPR_c:  {mpr_c}')
                 logs_i["mpr"].append(mpr)
             
@@ -1261,31 +1367,31 @@ class Trainer(GenericTrainer):
                     self.wandb_tracker.log({f"eval_{name}_{key}": avg}, step=current_global_step)
 
             imgs_dict = {}
-            for prompt_i, log_imgs_i in itertools.zip_longest(prompts, log_imgs):
-                for key, values in log_imgs_i.items():
-                    if key not in imgs_dict.keys():
-                        imgs_dict[key] = [wandb.Image(
-                            data_or_path=values[0],
-                            caption=prompt_i,
-                        )]
-                    else:
-                        imgs_dict[key].append(wandb.Image(
-                            data_or_path=values[0],
-                            caption=prompt_i,
-                        ))
-            for key, imgs in imgs_dict.items():
-                self.wandb_tracker.log(
-                    {f"eval_{name}_{key}": imgs},
-                    step=current_global_step
-                    ) 
-        
+        #    for prompt_i, log_imgs_i in itertools.zip_longest(prompts, log_imgs):
+        #        for key, values in log_imgs_i.items():
+        #            if key not in imgs_dict.keys():
+        #                imgs_dict[key] = [wandb.Image(
+        #                    data_or_path=values[0],
+        #                    caption=prompt_i,
+        #                )]
+        #            else:
+        #                imgs_dict[key].append(wandb.Image(
+        #                    data_or_path=values[0],
+        #                    caption=prompt_i,
+        #                ))
+        #    for key, imgs in imgs_dict.items():
+        #        self.wandb_tracker.log(
+        #            {f"eval_{name}_{key}": imgs},
+        #            step=current_global_step
+        #            ) 
         return logs, log_imgs
+    
     def unwrap_model(self, model):
         model = self.accelerator.unwrap_model(model)
         model = model._orig_mod if is_compiled_module(model) else model
         return model 
 
-    def _get_group_predictions(self, face_chips, selector=None, fill_value=-1):
+    def _get_group_predictions(self, face_chips, selector=None, fill_value=-1, eval=False):
         groups = self.args.trainer_group
 
         if selector != None:
@@ -1296,27 +1402,59 @@ class Trainer(GenericTrainer):
         if not hasattr(self, "group_classifier_dic"):
             self._set_group_clfs(groups)
 
+        def softmax_with_temperature(logits, temperature=1.0):
+            # Step 1: Temperature scaling
+            scaled_logits = logits / temperature
+
+            # Step 2: Exponentiate each logit (avoid overflow by subtracting max logit)
+            max_logit = torch.max(scaled_logits, dim=-1, keepdim=True).values
+            exp_logits = torch.exp(scaled_logits - max_logit)
+            
+            # Step 3: Calculate the sum of exponentiated logits
+            sum_exp_logits = torch.sum(exp_logits, dim=-1, keepdim=True)
+            
+            # Step 4: Normalize by dividing each exponentiated logit by the sum
+            softmax_probs = exp_logits / sum_exp_logits
+            return softmax_probs
+            
+        def sigmoid_with_temperature(logits, temperature=1.0):
+            # Step 1: Temperature scaling
+            scaled_logits = logits / temperature
+            
+            # Step 2: Apply the Sigmoid function manually
+            sigmoid_probs = 1 / (1 + torch.exp(-scaled_logits))
+            
+            return sigmoid_probs
+
         if face_chips_w_faces.shape[0] == 0: # if there is no face from generated images,
             probs_group = torch.empty([0,self.output_dim], dtype=face_chips.dtype, device=face_chips.device)
             preds_group = torch.empty([0], dtype=face_chips.dtype, device=face_chips.device)
         else:
             with torch.autocast("cuda"):
-                self.group_classifier_dic['vision_encoder'].to(self.weight_dtype)
+                face_chips_w_faces = (face_chips_w_faces - self.clip_img_mean_for_group) / self.clip_img_std_for_group
                 embeddings = self.group_classifier_dic['vision_encoder'].encode_image(face_chips_w_faces)
             probs_group = []
             preds_group = []
             for group in groups:
                 if group == 'face':
                     continue
-
                 clf = self.group_classifier_dic[group]
                 logits = clf(embeddings)
                 # if logits.shape[-1] == 1:
                 if group in ['gender', 'age']:
-                    probs = torch.sigmoid(logits)
+                    if self.ver == "ver3":
+                        probs = sigmoid_with_temperature(logits, self.temp)
+                    else:
+                        probs = torch.sigmoid(logits)
                     probs = torch.cat([1-probs, probs], dim=-1)
                 else:
-                    probs = torch.softmax(logits, dim=-1)
+                    if self.ver == "ver3":
+                        probs = softmax_with_temperature(logits, self.temp)
+                    else:
+                        probs = torch.softmax(logits, dim=-1)
+                # with torch.no_grad():
+                #     print(probs)
+                #     print(torch.softmax(logits, dim=-1))
                 probs_group.append(probs)
                 temp = probs.max(dim=-1)
                 preds = temp.indices
@@ -1395,15 +1533,32 @@ class Trainer(GenericTrainer):
         return weights
 
     def model_sanity_print(self, model, state):
-        params = [p for p in model]
-        print(f"\t{self.accelerator.device}; {state};\n\t\tparam[0]: {params[0].flatten()[0].item():.8f};\tparam[0].grad: {params[0].grad.flatten()[0].item():.8f}")
+        params = [p for p in model.parameters()]
+        # for i, p in enumerate(model):
+            # print(params[0].grad)
+        print(f"\t{self.accelerator.device}; {state};\n\t\/: {params[0].flatten()[0].item():.8f};\tparam[0].grad: {params[0].grad.flatten()[0].item():.8f}")
         
 
-
-
+class CustomModel(torch.nn.Module):
+    def __init__(self, dict):
+        """
+        In the constructor we instantiate four parameters and assign them as
+        member parameters.
+        """
+        super().__init__()
+        self.param_names = list(dict.keys())
+        self.params = nn.ParameterList()
+        for name in self.param_names:
+            self.params.append( dict[name] )
+    def forward(self, x):
+        """
+        no forward function
+        """
+        return None
+    
 def get_curation_set(args):
     from mpr.preprocessing import identity_embedding
-    vision_encoder = networks.ModelFactory.get_model(modelname=args.vision_encoder, train=args.train)  
+    vision_encoder = networks.ModelFactory.get_model(modelname=args.vision_encoder)  
     _, refer_loader = data_handler.DataloaderFactory.get_dataloader(dataname=args.refer_dataset, args=args)
     refer_embedding, _ = identity_embedding(args, vision_encoder, refer_loader, args.trainer_group, query=False)
     print('refer_embedding:', refer_embedding.shape)
@@ -1415,6 +1570,7 @@ def make_grad_hook(coef):
 def customized_all_gather(tensor, accelerator, return_tensor_other_processes=False):
     tensor_all = [tensor.detach().clone() for i in range(accelerator.num_processes)]
     torch.distributed.all_gather(tensor_all, tensor)
+    
     if return_tensor_other_processes:
         if accelerator.num_processes>1:
             tensor_others = torch.cat([tensor_all[idx] for idx in range(accelerator.num_processes) if idx != accelerator.local_process_index], dim=0)

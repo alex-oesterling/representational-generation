@@ -1,4 +1,4 @@
-from trainer import GenericTrainer
+
 import pandas as pd
 import torch
 import ast
@@ -6,6 +6,7 @@ import copy
 import numpy as np
 from transformers import CLIPProcessor, CLIPModel
 import time
+from trainer import GenericTrainer
 class Trainer(GenericTrainer):
     # concepts = ['attendant', 'cashier', 'teacher','nurse', 'assistant',
     #              'secretary', 'cleaner', 'receptionist','clerk','counselor',
@@ -15,7 +16,8 @@ class Trainer(GenericTrainer):
     #                  'lawyer', 'farmer', 'salesperson', 'physician', 'firefighter', 
     #                  'analyst', 'mechanic', 'sheriff', 'CEO', 'doctor', 'chef']
     # concepts = ["CEO", "firefighter", "chef", "cook", "therapist", "housekeeper", "pilot", "flight attendant", "taxi driver", "nurse"]
-    concepts = ["computer programmer"]#, "computer programmer for the ENIAC”"]
+    concepts = ["CEO", "firefighter"]
+#    concepts = ["computer programmer"]#, "computer programmer for the ENIAC”"]
     
     def __init__(self, **kwargs):
         super(Trainer, self).__init__(**kwargs)

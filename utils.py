@@ -12,11 +12,11 @@ import clip
 import sys
 import logging
 import collections
-
-
+import networks
+from torchvision import transforms
 from copy import deepcopy
 from torch import distributed as dist
-
+from mpr.preprocessing import CLIPExtractor
 
 def is_dist() -> bool:
     if not dist.is_available():
@@ -170,12 +170,18 @@ class LoggerBuffer():
             self.logger.info(screen_msg)
 
 def get_statistics(concept, groups):
-    path = './datasets/mpr_stuffs/statistics'
-    if groups == ['wheelchair', 'race2']:
-        group_name = 'wheelchair_race'
-    filename = f'{concept}_{group_name}.pkl'
-    with open(os.path.join(path, filename), 'rb') as f:
-        statistics = pickle.load(f)
+    if concept == 'disability':
+        path = '/n/holylabs/LABS/calmon_lab/Lab/datasets/mpr_stuffs/statistics/'
+        if groups == ['wheelchair', 'race2']:
+            group_name = 'wheelchair_race'
+        filename = f'{concept}_{group_name}.pkl'
+        with open(os.path.join(path, filename), 'rb') as f:
+            statistics = pickle.load(f)
+    elif 'ENIAC' in concept:
+        statistics = {}
+        statistics['group'] = ['female','male']
+        statistics['prob'] = torch.zeros((2,2))
+        statistics['prob'][0,0] = 1
     return statistics
 
 
@@ -224,15 +230,115 @@ def compute_similarity(visual_features, target_concept, vision_encoder, vision_e
     visual_features = visual_features / np.linalg.norm(visual_features, axis=-1, keepdims=True) 
     vision_encoder.eval()
     with torch.no_grad():        
-        prompt = f'photo portrait of {target_concept}'
-        text = clip.tokenize(prompt)
-        if torch.cuda.is_available():
-            text = text.cuda()
-        text_embedding = vision_encoder.encode_text(text).float()
-        text_embedding = text_embedding.cpu().numpy().squeeze()
-        text_embedding = text_embedding / np.linalg.norm(text_embedding)
-        similarity = visual_features @ text_embedding
+        with torch.autocast("cuda"):
+            prompt = f'photo portrait of {target_concept}'
+            text = clip.tokenize(prompt)
+            if torch.cuda.is_available():
+                text = text.cuda()
+            text_embedding = vision_encoder.encode_text(text).float()
+            text_embedding = text_embedding.cpu().numpy().squeeze()
+            text_embedding = text_embedding / np.linalg.norm(text_embedding)
+            similarity = visual_features @ text_embedding
     return similarity
+
+def make_embeddings(loader, vision_encoder=None, args=None, query=True):
+    dataset_name = 'mscoco' if not query else args.query_dataset
+    path = loader.dataset.dataset_path
+    ver = 'normal'
+    filename = f'fid_feature.pkl'
+    filepath = os.path.join(path,filename)
+
+    features = []
+    if os.path.exists(filepath):
+        with open(os.path.join(path,filename), 'rb') as f:
+            feature =  pickle.load(f)
+        if feature.shape[0] == len(loader.dataset):
+            print(f'embedding vectors of {dataset_name} are successfully loaded in {path}')
+            feature = torch.tensor(feature)
+            # feature =  feature / feature.norm(dim=-1, keepdim=True)
+            return feature.cpu()
+
+    transform = transforms.Compose(
+                    [
+                    transforms.Resize((224,224)),
+                    transforms.CenterCrop(224),
+                    transforms.ToTensor()]
+                    )   
+    loader.dataset.transform = transform
+
+    # with torch.no_grad():
+    #     if vision_encoder is None:
+    #         vision_encoder = networks.ModelFactory.get_model(modelname='CLIP', train=False)  
+    #         vision_encoder.eval()
+    #         vision_encoder = vision_encoder.cuda() if torch.cuda.is_available() else vision_encoder
+    #     feature_extractor = CLIPExtractor(vision_encoder)
+        
+    total_samples = 0
+    features = []
+    for batch in tqdm(loader):
+        image, label, idxs =  batch
+        total_samples += len(idxs)
+        # if torch.cuda.is_available():
+        #     image = image.cuda()
+        # feature = feature_extractor.extract(image)
+        feature = image
+        features.append(feature)
+        if total_samples >= 1000:
+            break
+    features = torch.cat(features, dim=0)
+    # features = features / features.norm(dim=-1, keepdim=True)
+    features = features.cpu()
+    with open(filepath, 'wb') as f:
+        pickle.dump(features, f)
+    return features
+
+def compute_mmd(x, y):
+    """A memory-efficient MMD implementation in PyTorch.
+
+    This implements the minimum-variance/biased version of the estimator described
+    in Eq.(5) of https://jmlr.csail.mit.edu/papers/volume13/gretton12a/gretton12a.pdf.
+    As described in Lemma 6's proof in that paper, the unbiased estimate and the
+    minimum-variance estimate for MMD are almost identical.
+
+    Note that this function may consume significant memory if x has many rows.
+
+    Args:
+        x: The first set of embeddings of shape (n, embedding_dim).
+        y: The second set of embeddings of shape (n, embedding_dim).
+
+    Returns:
+        The MMD distance between x and y embedding sets.
+    """
+    # The bandwidth parameter for the Gaussian RBF kernel.
+    _SIGMA = 10
+    # Used to make the metric more human-readable.
+    _SCALE = 100
+
+    x = torch.as_tensor(x, dtype=torch.float32)
+    y = torch.as_tensor(y, dtype=torch.float32)
+
+    # Compute squared norms of x and y
+    x_sqnorms = torch.sum(x * x, dim=1)
+    y_sqnorms = torch.sum(y * y, dim=1)
+    gamma = 1 / (2 * _SIGMA**2)
+
+    # Compute squared distances and kernel matrices
+    D_xx = -2 * torch.matmul(x, x.T) + x_sqnorms.unsqueeze(1) + x_sqnorms.unsqueeze(0)
+    print(torch.matmul(x, x.T).shape)
+    K_xx = torch.exp(-gamma * D_xx)
+    k_xx = torch.mean(K_xx)
+
+    D_xy = -2 * torch.matmul(x, y.T) + x_sqnorms.unsqueeze(1) + y_sqnorms.unsqueeze(0)
+    K_xy = torch.exp(-gamma * D_xy)
+    k_xy = torch.mean(K_xy)
+
+    D_yy = -2 * torch.matmul(y, y.T) + y_sqnorms.unsqueeze(1) + y_sqnorms.unsqueeze(0)
+    K_yy = torch.exp(-gamma * D_yy)
+    k_yy = torch.mean(K_yy)
+
+    mmd =  _SCALE * (k_xx + k_yy - 2 * k_xy)
+    # return torch.matmul(x, y.T).mean()
+    return mmd.item()
 
 def get_concept_embedding(vision_encoder, target_concept, vision_encoder_name='clip'):
     """

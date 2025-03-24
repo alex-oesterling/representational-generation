@@ -10,20 +10,18 @@ import pickle
 from tqdm import tqdm
 
 group_dic = {
-    'gender' : ['male', 'female'],
+    'gender' : ['female', 'male'],
     'age' : ['young', 'old'],
     'race' : ['East Asčian', 'Indian', 'Black', 'White', 'Middle Eastern', 'Latino_Hispanic', 'Southeast Asian'],
     'race2' : ['White', 'Black', 'Latino_Hispanic', 'Asian'],
     'face' : ['Bald', 'Bangs', 'Black_Hair', 'Blond_Hair', 'Blurry', 'Double_Chin', 'Eyeglasses',
                 'Goatee', 'Gray_Hair', 'Heavy_Makeup', 'Mustache', 'No_Beard', 'Sideburns', 'Smiling', 'Wearing_Hat'],
     'wheelchair' : ['not wheelchair', 'wheelchair'],
+    'emotion' : ['male_emotion', 'female_emotion'],
+    'eyeglasses' : ['eyeglsses', 'no_eyeglasses'],
 }
 
-def getMPR(groups, dataset, k=0, curation_set=None, statistics=None, modelname=None, indices=None, normalize=False):
-    if indices is None:
-        indices = np.ones(dataset.shape[0])
-    k = int(np.sum(indices))
-
+def make_dnf_feature(modelname, dataset, curation_set):
     # preprocessing features for the case of boolean series
     if 'boolean' in modelname:
         try:
@@ -36,7 +34,14 @@ def getMPR(groups, dataset, k=0, curation_set=None, statistics=None, modelname=N
             for idxs in itertools.combinations(range(dim), d):
                 dataset = np.concatenate((dataset, np.prod(dataset[:,idxs], axis=1).reshape(-1,1)), axis=1)
                 curation_set = np.concatenate((curation_set, np.prod(curation_set[:,idxs], axis=1).reshape(-1,1)), axis=1)
-    
+
+    return dataset, curation_set
+
+def getMPR(groups, dataset, k=0, curation_set=None, statistics=None, modelname=None, indices=None, normalize=False, onehot=False):
+    if indices is None:
+        indices = np.ones(dataset.shape[0])
+    k = int(np.sum(indices))
+
     # normalizing the dataset, we don't need to normalize the curation set for decision tree
     if normalize and 'dt' not in modelname:
         dataset = dataset / np.linalg.norm(dataset, axis=-1, keepdims=True)
@@ -53,12 +58,10 @@ def getMPR(groups, dataset, k=0, curation_set=None, statistics=None, modelname=N
                 c = reg.predict(expanded_dataset)
             else:
                 c = np.dot(expanded_dataset, reg)
-            # c /= np.linalg.norm(c)
-            # c *= np.sqrt(c.shape[0]) ## sqrt(n+m) = 141   
-            # c *= np.sqrt(m*k/(m+k))
             mpr = np.abs(np.sum((indices/k)*c[:dataset.shape[0]]) - np.sum((1/m)*c[dataset.shape[0]:]))
+
     # Decision tree
-    else:
+    elif 'dt' in modelname and onehot:
         group_list = []
         for group in groups:
             if group != 'face':
@@ -98,7 +101,7 @@ def getMPR(groups, dataset, k=0, curation_set=None, statistics=None, modelname=N
             else:
                 q = _compute_intersectional_probabilities(curation_set[:,idxs], depth)
             mpr = 0.5 * np.sum(np.abs(p - q))
-            print(group_list[idxs], mpr, p, q)
+            # print(group_list[idxs], mpr, p, q)
             if max_mpr < mpr:
                 max_mpr = mpr
                 max_idxs = idxs
@@ -120,9 +123,11 @@ def getMPR(groups, dataset, k=0, curation_set=None, statistics=None, modelname=N
         mpr = max_mpr
 
         reg = {'subgroup_info' : subgroup_info, 'max_mpr' : max_mpr, 'max_idxs' : max_idxs}
+    
+    elif 'dt' in modelname and not onehot:
+        oracle = RandomForestRegressor(max_depth=2)
             
     return mpr, reg
-
 
 def oracle_function(indices, dataset, curation_set=None, modelname='linear'):
     if modelname == 'linear' or 'boolean' in modelname:
@@ -180,10 +185,27 @@ def _compute_intersectional_probabilities(dataset, depth):
     
     return probs
 
+# def nominate_group_numer(dataset, depth):
+#     dim = dataset.shape[1]
+#     binary_vectors = list(itertools.product([0, 1], repeat=depth))
+#     binary_vectors = [np.array(v) for v in binary_vectors]
+#     for idxs in itertools.combinations(range(dim), depth): 
+#         datasets
+#     idxs = list(idxs)
+#     idxs.sort()
+#     idxs = np.array(idxs)
+#     # should we condition cases where male and female are selected at the same time?
+#     # dataset = np.concatenate((dataset, np.prod(dataset[:,idxs], axis=1).reshape(-1,1)), axis=1)
+#     p = _compute_intersectional_probabilities(dataset[:,idxs], depth)
+
+
 def _marginalize(statistics, groups):
     idxs_marginzalie = []
     for idx, group in enumerate(statistics['group']):
         if group not in groups:
             idxs_marginzalie.append(idx)
+    # print(statistics['prob'], idxs_marginzalie)
+    # print(statistics['prob'].sum(axis=idxs_marginzalie))
+    # idxs_marginzalie = tuple(idxs_marginzalie)
     return statistics['prob'].sum(axis=idxs_marginzalie).flatten().numpy()
     

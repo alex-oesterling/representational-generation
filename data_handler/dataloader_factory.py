@@ -5,8 +5,6 @@ import numpy as np
 from torchvision import transforms
 from torch.utils.data import DataLoader
 import torchvision.transforms.functional as TF
-
-from diffusers.image_processor import VaeImageProcessor
 import random 
 
 # from transformers import BlipProcessor, BlipModel, BlipForConditionalGeneration, BlipForQuestionAnswering
@@ -28,6 +26,15 @@ class DataloaderFactory:
         elif args.vision_encoder == 'CLIP':
             import clip
             _, transform = clip.load("ViT-B/32", device= 'cpu')
+            # print(transform)
+            # mean = [0.48145466, 0.4578275, 0.40821073]
+            # std = [0.26862954, 0.26130258, 0.27577711]
+            # transform = transforms.Compose(
+            #                  [
+            #                     transforms.Resize((224,224)),
+            #                     transforms.CenterCrop(224),
+            #         transforms.Normalize(mean=mean, std=std)]
+            # )
 
         else:
             # For CelebA
@@ -65,7 +72,7 @@ class DataloaderFactory:
 
         if dataname != 'mscoco': # mscoco doesn't have the test dataset
             test_dataset = DatasetFactory.get_dataset(args, dataname, transform, processor, split='test')
-            test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.n_workers, worker_init_fn=_init_fn, pin_memory=True,)
+            test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.n_workers, worker_init_fn=_init_fn, pin_memory=True)
         else:
             test_dataloader = None
             

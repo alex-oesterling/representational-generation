@@ -36,6 +36,37 @@ class ModelFactory:
             from diffusers import AutoPipelineForText2Image
             network = AutoPipelineForText2Image.from_pretrained("stabilityai/stable-diffusion-xl-base-1.0", torch_dtype=torch.float16, 
                                                                 variant="fp16", use_safetensors=True, cache_dir=cache_dir)
+        elif modelname == 'LCM':
+            from diffusers import UNet2DConditionModel, DiffusionPipeline, LCMScheduler
+            unet = UNet2DConditionModel.from_pretrained("latent-consistency/lcm-sdxl", torch_dtype=torch.float16, variant="fp16", cache_dir=cache_dir)
+            pipe = DiffusionPipeline.from_pretrained("stabilityai/stable-diffusion-xl-base-1.0", unet=unet, torch_dtype=torch.float16, variant="fp16", cache_dir=cache_dir)
+            pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
+            network = pipe
+        elif modelname == 'cascade':
+            from diffusers import StableCascadeCombinedPipeline,StableCascadePriorPipeline,StableCascadeDecoderPipeline
+            # pipe = StableCascadeCombinedPipeline.from_pretrained("stabilityai/stable-cascade", variant="bf16", torch_dtype=torch.bfloat16)
+            prior = StableCascadePriorPipeline.from_pretrained("stabilityai/stable-cascade-prior", variant="bf16", torch_dtype=torch.bfloat16)
+            decoder = StableCascadeDecoderPipeline.from_pretrained("stabilityai/stable-cascade", variant="bf16", torch_dtype=torch.float16)
+            prior = prior.to('cuda')
+            decoder = decoder.to('cuda')
+            network = (prior, decoder)
+            # pipe = pipe.to(torch.float16)
+            # network = pipe
+        elif modelname == 'pixelart':
+            from diffusers import PixArtSigmaPipeline
+            pipe = PixArtSigmaPipeline.from_pretrained(
+                "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS",
+                torch_dtype=torch.float16,
+                # variant="fp16"
+            )
+            network = pipe
+        elif modelname == 'playground':
+            from diffusers import  DiffusionPipeline
+            network = DiffusionPipeline.from_pretrained(
+                "playgroundai/playground-v2.5-1024px-aesthetic",
+                torch_dtype=torch.float16,
+                variant="fp16",
+            )
         else:
             raise NotImplementedError
 

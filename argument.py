@@ -4,14 +4,18 @@ import torch
 def get_args():
     parser = argparse.ArgumentParser(description='representational-generation')
 
-    parser.add_argument('--train', default=False, action='store_true', help='train the model')
+    parser.add_argument('--no-wandb', default=False, action='store_true')
 
+    parser.add_argument('--train', default=False, action='store_true', help='train the model')
+    parser.add_argument('--trainer', default='scratch', type=str, help='choose the trainer')
+    
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--n-workers', type=int, default=1)
     parser.add_argument('--batch-size', type=int, default=256)
+    parser.add_argument('--train_GPU_batch_size', type=int, default=256)
     
     # For coupmting MPR
-    parser.add_argument('--refer-dataset', type=str, default='fairface', choices=['fairface', 'stable_bias_i','statistics'])
+    parser.add_argument('--refer-dataset', type=str, default='fairface', choices=['uniform', 'fairface', 'custom','stable_bias_i','statistics'])
     parser.add_argument('--query-dataset', type=str, default='CLIP')
     parser.add_argument('--dataset-path', type=str, default=None, help='it is only used when query-dataset is general')
     parser.add_argument('--p-ver', type=str, default='v1', help='version of prompts used for generating')
@@ -21,8 +25,10 @@ def get_args():
     parser.add_argument('--target-model', type=str, default='SD_14') #required=True, 
     parser.add_argument('--mpr-group', type=str, nargs='+', default=['gender','age','race'])    
     parser.add_argument('--mpr-onehot', default=False, action='store_true', help='onehot group estimation')
+    parser.add_argument('--race-reduce', default=False, action='store_true', help='reduce the category of race')
     parser.add_argument('--n-compute-mpr', type=int, default=1)
     parser.add_argument('--bootstrapping', default=False, action='store_true', help='bootstrapping')
+    parser.add_argument('--bal-sampling', default=False, action='store_true', help='balanced sampling over groups1')
     parser.add_argument('--n-resampling', type=int, default=1000, help='bootstrapping')
     parser.add_argument('--resampling-size', default=1000, type=int, help='bootstrapping')
     parser.add_argument('--normalize', default=False, action='store_true', help='normalization for x')
@@ -50,6 +56,8 @@ def get_args():
     # Info for result file names 
     parser.add_argument('--date', type=str, default='default', help='date when to save')
     parser.add_argument('--save-dir', type=str, default='results/', help='directory to save the results')
+
+    parser.add_argument('--save-labels', default=False, action='store_true')
 
     args = parser.parse_args()
     return args

@@ -36,6 +36,7 @@ import utils
 
 def main(args):
     dm = networks.ModelFactory.get_model(modelname=args.target_model, train=args.train)
+    print(dm.name_or_path)
     _trainer = trainer.TrainerFactory.get_trainer(trainername=args.trainer, model=dm, args=args)    
 
     if args.trainer in ['finetuning', 'rag']:
@@ -92,14 +93,18 @@ def main(args):
         group_name = "".join([g[0].upper() for g in args.trainer_group])
         # group_name = args.group[0]
 
-        folder_name = f"{args.train_images_per_prompt_GPU*accelerator.num_processes}_wImg-{args.weight_loss_img}-loraR-{args.rank}_lr-{args.learning_rate}"#_{timestring}"
-        
+        prompt_file_name = args.prompt_occupation_path.split('/')[-1].split('.')[0]
+        folder_name = f"{args.train_images_per_prompt_GPU*accelerator.num_processes}_wImg-{args.weight_loss_img}-loraR-{args.rank}_lr-{args.learning_rate}_{prompt_file_name}"#_{timestring}"
+        if args.finetuning_ver == 'ver3':
+            folder_name += f'_{args.temp}'
+        if args.finetuning_ver == 'ver1':
+            folder_name += f'_{args.n_cs}_{args.mpr_num_batches}'
         if args.trainer == 'finetuning':
-            method_name = args.trainer + '_' + args.finetuning_ver
+            method_name = args.trainer + '_' + args.finetuning_ver 
         else:
             method_name = args.trainer
-        args.imgs_save_dir = os.path.join('datasets', method_name, group_name, "imgs_in_training", folder_name)
-        args.ckpts_save_dir = os.path.join('trained_models', method_name, group_name, folder_name, "ckpts")
+        args.imgs_save_dir = os.path.join('/n/netscratch/calmon_lab/Lab/datasets', method_name, group_name, "imgs_in_training", folder_name)
+        args.ckpts_save_dir = os.path.join('/n/netscratch/calmon_lab/Lab/trained_models', method_name, group_name, folder_name, "ckpts")
 
         if accelerator.is_main_process:
             os.makedirs(args.imgs_save_dir, exist_ok=True)

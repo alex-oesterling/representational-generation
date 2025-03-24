@@ -62,7 +62,7 @@ def get_face_feats(net, data, flip=True, normalize=True, to_high_precision=True)
         feats = torch.nn.functional.normalize(feats, dim=-1)
     return feats
 
-def get_face(images, args, fill_value=-1):
+def get_face(images, args, fill_value=-1, eval=False):
     """
     images:shape [N,3,H,W], in range [-1,1], pytorch tensor
     returns:
@@ -77,7 +77,7 @@ def get_face(images, args, fill_value=-1):
 
 
     # if face_indicators_app.logical_not().sum() > 0:
-    face_indicators_FR, face_bboxs_FR, face_chips_FR, face_landmarks_FR, aligned_face_chips_FR = get_face_FR(images, args, fill_value=fill_value)
+    face_indicators_FR, face_bboxs_FR, face_chips_FR, face_landmarks_FR, aligned_face_chips_FR = get_face_FR(images, args, fill_value=fill_value, eval=eval)
 
     # face_bboxs_app[face_indicators_app.logical_not()] = face_bboxs_FR
     # face_chips_app[face_indicators_app.logical_not()] = face_chips_FR
@@ -141,7 +141,7 @@ def get_face(images, args, fill_value=-1):
 #     return face_indicators_app, face_bboxs_app, face_chips_app, face_landmarks_app, aligned_face_chips_app
             
 
-def get_face_FR(images, args, fill_value=-1):
+def get_face_FR(images, args, fill_value=-1, eval=False):
     """
     images:shape [N,3,H,W], in range [-1,1], pytorch tensor
     returns:
@@ -152,8 +152,8 @@ def get_face_FR(images, args, fill_value=-1):
         face_chips: torch tensor of shape [N,3,224,224]
             if face_indicator is False, the corresponding face_chip will be all fill_value
     """
-
-    images_np = ((images*0.5 + 0.5)*255).cpu().detach().permute(0,2,3,1).float().numpy().astype(np.uint8)
+    images_np = (images*255).cpu().detach().permute(0,2,3,1).float().numpy().astype(np.uint8)
+    # images_np = (images*255).cpu().detach().permute(0,2,3,1).float().numpy().astype(np.uint8)
     
     face_indicators_FR = []
     face_bboxs_FR = []
@@ -174,7 +174,7 @@ def get_face_FR(images, args, fill_value=-1):
             bbox = face_from_FR
             bbox = np.array((bbox[-1],) + bbox[:-1]) # need to convert bbox from face_recognition to the right order
             bbox = expand_bbox(bbox, expand_coef=1.1, target_ratio=1) # need to use a larger expand_coef for FR
-            face_chip = crop_face(images[idx], bbox, target_size=[args.size_face,args.size_face], fill_value=fill_value)
+            face_chip = crop_face(images[idx], bbox, target_size=[args.size_face,args.size_face], fill_value=fill_value, eval=eval, idx=idx)
             
             face_landmarks = face_recognition.face_landmarks(image_np, face_locations=[face_from_FR], model="large")
 
@@ -200,7 +200,6 @@ def get_face_FR(images, args, fill_value=-1):
     aligned_face_chips_FR = torch.cat(aligned_face_chips_FR, dim=0)
     
     return face_indicators_FR, face_bboxs_FR, face_chips_FR, face_landmarks_FR, aligned_face_chips_FR
-
 
 def get_largest_face_FR(faces_from_FR, dim_max, dim_min):
     if len(faces_from_FR) == 1:
@@ -231,7 +230,6 @@ def get_largest_face_app_idx(face_from_app, dim_max, dim_min):
                 idx_max = idx
         return idx_max
 
-
 def image_grid(imgs, rows, cols):
     assert len(imgs) == rows*cols
 
@@ -247,7 +245,6 @@ def plot_in_grid_gender_race_age(images, save_to, face_indicators=None, face_bbo
     """
     images: torch tensor in shape of [N,3,H,W], in range [-1,1]
     """
-    
     idxs_reordered = []
     for g in [1,0]:
         for r in [0,1,2,3]:
@@ -337,7 +334,7 @@ def plot_in_grid_gender_race_age(images, save_to, face_indicators=None, face_bbo
         os.makedirs(os.path.dirname(save_to))
     grid.save(save_to, quality=25)
 
-def plot_in_grid(images, save_to, face_indicators=None, face_bboxs=None, preds_group=None, probs_group=None, group=['gender','age','rage']):
+def plot_in_grid(images, save_to, face_indicators=None, face_bboxs=None, preds_group=None, probs_group=None, group=['gender','age','rage'], save_images=False):
     """
     images: torch tensor in shape of [N,3,H,W], in range [-1,1]
     """
@@ -349,65 +346,27 @@ def plot_in_grid(images, save_to, face_indicators=None, face_bboxs=None, preds_g
     images_w_face = images[face_indicators]
     images_wo_face = images[face_indicators.logical_not()]
 
-    # tmp = [list(range(len(group_dic[_g]))) for _g in group]
-    # num_group = len(group)
-    # idxs_reordered = []
-    # for g in itertools.product(*tmp):
-    #     idxs_ = preds_group[:,0] == g[0]
-    #     if num_group > 1:
-    #         for i in range(1,num_group):
-    #             idxs_ = idxs_ * (preds_group[:,i] == g[i])
-    #     idxs_ = idxs_.nonzero(as_tuple=False).view([-1])
-    #     probs_ = probs_group[:,:2].max(dim=-1).values
-    #     idxs_ = idxs_[probs_.argsort(descending=True)]
-    #     idxs_reordered.append(idxs_)
-        
-
-    # idxs_male = (preds_gender == 1).nonzero(as_tuple=False).view([-1])
-    # probs_male = pred_class_probs_gender[idxs_male]
-    # idxs_male = idxs_male[probs_male.argsort(descending=True)]
-
-    # idxs_female = (preds_gender == 0).nonzero(as_tuple=False).view([-1])
-    # probs_female = pred_class_probs_gender[idxs_female]
-    # idxs_female = idxs_female[probs_female.argsort(descending=True)]
-
-    # idxs_no_face = (preds_gender == -1).nonzero(as_tuple=False).view([-1])
 
     images_to_plot = []
-    # idxs_reordered = torch.torch.cat([idxs_male, idxs_female, idxs_no_face])
     
-    # for idx in idxs_reordered:
+    # if save_images:
+    #     tmp_folder = save_to.split('.')[-3] + save_to.split('.')[-2] + '/tmp'
+    #     print(tmp_folder)
+    #     if not os.path.exists(tmp_folder):
+    #         os.makedirs(tmp_folder)
+
     for idx in range(len(images)):
         img = images[idx]
-        face_indicator = face_indicators[idx]
-        face_bbox = face_bboxs[idx]
-        # pred_gender = preds_gender[idx]
-        # pred_class_prob_gender = pred_class_probs_gender[idx]
         
-        # if pred_gender == 1:
-        #     pred = "Male"
-        #     border_color = "blue"
-        # elif pred_gender == 0:
-        #     pred = "Female"
-        #     border_color = "red"
-        # elif pred_gender == -1:
-        #     pred = "Undetected"
-        #     border_color = "white"
-        
-        img_pil = transforms.ToPILImage()(img*0.5+0.5)
-        # img_pil_draw = ImageDraw.Draw(img_pil)  
-        # img_pil_draw.rectangle(face_bbox.tolist(), fill =None, outline =border_color, width=4)
+        img_pil = transforms.ToPILImage()(img)
 
-        # img_pil = ImageOps.expand(img_pil, border=(50,0,0,0),fill=border_color)
-
-        # img_pil_draw = ImageDraw.Draw(img_pil)
-        # if pred_class_prob_gender.item() < 1:
-            # img_pil_draw.rectangle([(0,0),(50,(1-pred_class_prob_gender.item())*512)], fill ="white", outline =None)
-
-        # fnt = ImageFont.truetype(font="../data/0-utils/arial-bold.ttf", size=100)
-        # img_pil_draw.text((400, 400), f"{idx.item()}", align ="left", font=fnt)
-
-        # img_pil = ImageOps.expand(img_pil_draw._image, border=(10,10,10,10),fill="black")
+        # if idx == 2:
+        #     img_tmp = (img * 255).to(torch.uint8).to(torch.float16)/255.0
+        #     img = transforms.ToTensor()(img_pil)
+        #     print('before saving :', img[:,100:103,100:103])
+            # print('before saving2 :', img_tmp[:,100:103,100:103])
+        # if save_images:
+            # img_pil.save(f"{tmp_folder}/{idx}.png")
         
         images_to_plot.append(img_pil)
         
@@ -423,8 +382,6 @@ def plot_in_grid(images, save_to, face_indicators=None, face_bboxs=None, preds_g
     if not os.path.exists(os.path.dirname(save_to)):
         os.makedirs(os.path.dirname(save_to))
     grid.save(save_to, quality=25)
-
-
 
 def expand_bbox(bbox, expand_coef, target_ratio):
     """
@@ -455,7 +412,7 @@ def expand_bbox(bbox, expand_coef, target_ratio):
     bbox_new[3] = int(round(bbox[3] + more_height*0.5))
     return bbox_new
 
-def crop_face(img_tensor, bbox_new, target_size, fill_value):
+def crop_face(img_tensor, bbox_new, target_size, fill_value, eval=False, idx=-1):
     """
     img_tensor: [3,H,W]
     bbox_new: [width_small, height_small, width_large, height_large]
@@ -475,9 +432,18 @@ def crop_face(img_tensor, bbox_new, target_size, fill_value):
     pad_bottom = max(-(img_height-bbox_new[3]),0)
 
     img_face = img_tensor[:,idx_bottom:idx_top,idx_left:idx_right]
+    # if eval:
+    #     img_face = (img_face * 255).to(torch.uint8).to(torch.float16)
+    #     img_face = img_face/255.0 
+    #     if idx == 2:
+    #         print('before padding :', img_face[:,100:103,100:103])
     if pad_left>0 or pad_top>0 or pad_right>0 or pad_bottom>0:
-        img_face = torchvision.transforms.Pad([pad_left,pad_top,pad_right,pad_bottom], fill=fill_value)(img_face)
+        img_face = torchvision.transforms.Pad([pad_left,pad_top,pad_right,pad_bottom], fill=0)(img_face)
+    # if idx == 2 and eval:
+    #     print('after padding :', img_face[:,100:103,100:103])
     img_face = torchvision.transforms.Resize(size=target_size)(img_face)
+    # if idx == 2 and eval:
+    #     print('after resize :', img_face[:,100:103,100:103])
     return img_face
 
 def image_pipeline(img, tgz_landmark):

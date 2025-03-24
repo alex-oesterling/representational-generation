@@ -7,10 +7,9 @@ import pickle
 from tqdm import tqdm
 import torch
 import torch.nn as nn
-
+import clip 
 from transformers import Blip2Processor, Blip2Model, AutoProcessor, AutoTokenizer, Blip2ForConditionalGeneration
 import torch
-from torch.utils.data import DataLoader
 class BLIPPredictor:
     def __init__(self):
         cache_dir='/n/holylabs/LABS/calmon_lab/Lab/diffusion_models'
@@ -44,9 +43,8 @@ class BLIPPredictor:
         return torch.tensor(generated_ans)
         
 class CLIPExtractor:
-    def __init__(self, encoder, args):
+    def __init__(self, encoder):
         self.encoder = encoder
-        self.args = args
 
     def extract(self, images, query=True):
         if torch.cuda.is_available():
@@ -60,7 +58,9 @@ def identity_embedding(args, encoder, dataloader, groups, query=True):
     path = dataloader.dataset.dataset_path
     
     feature_dic = {}
+    
     for ver in ['normal', 'face_detect']:
+    # for ver in ['normal']:#, 'face_detect']:
         # make feature vectors
 
         filename = f'{args.vision_encoder}_{ver}_feature.pkl'
@@ -71,16 +71,18 @@ def identity_embedding(args, encoder, dataloader, groups, query=True):
         if os.path.exists(filepath):
             with open(os.path.join(path,filename), 'rb') as f:
                 feature_dic[ver] =  pickle.load(f)
-            print(f'embedding vectors of {dataset_name} are successfully loaded in {path}')
-            continue
-        else:
-            save_flag = True
+            if feature_dic[ver].shape[0] == len(dataloader.dataset):
+                print(f'embedding vectors of {dataset_name} are successfully loaded in {path}')
+                continue
+
+        save_flag = True
 
         if ver == 'face_detect':
             dataloader.dataset.turn_on_detect()
 
         encoder.eval()
         encoder = encoder.cuda() if torch.cuda.is_available() else encoder
+        # encoder = encoder.to(torch.float16)
 
         feature_extractor = None
 
@@ -88,14 +90,15 @@ def identity_embedding(args, encoder, dataloader, groups, query=True):
             feature_extractor = BlipExtractor(encoder, args)
         
         elif args.vision_encoder == 'CLIP':
-            feature_extractor =  CLIPExtractor(encoder, args)
+            feature_extractor =  CLIPExtractor(encoder)
     
         for batch in tqdm(dataloader):
             image, label, idxs =  batch
 
             if torch.cuda.is_available():
                 image = image.cuda()
-
+            # image = image.to(torch.float16)
+            # with torch.autocast("cuda"):
             feature = feature_extractor.extract(image)
             features.append(feature.cpu())
         
@@ -108,11 +111,13 @@ def identity_embedding(args, encoder, dataloader, groups, query=True):
         if save_flag:
             with open(filepath, 'wb') as f:
                 pickle.dump(features, f)
+
     # group estimation
     estimated_groups = []
     for group in groups:
-        if group in ['gender', 'race', 'race2', 'age', 'face', 'skintone', 'emotion']:
+        if group in ['gender', 'race', 'race2', 'age', 'face', 'skintone', 'emotion','paths', 'eyeglasses']:
             feature = feature_dic['face_detect']
+            # feature = feature_dic['normal']
         elif group in ['background', 'house']:
             feature = feature_dic['normal']
         elif group in ['wheelchair']:            
@@ -120,16 +125,18 @@ def identity_embedding(args, encoder, dataloader, groups, query=True):
         else:
             raise ValueError(f'group {group} is not supported')
 
-        estimated_group = group_estimation(feature,group, args.vision_encoder, onehot=args.mpr_onehot, loader=dataloader)
+        estimated_group = group_estimation(feature,group, args.vision_encoder, onehot=args.mpr_onehot, loader=dataloader, encoder=encoder, query=query)
         estimated_groups.append(estimated_group)
     estimated_groups = np.concatenate(estimated_groups, axis=1)
     return estimated_groups, feature_dic
             
-def group_estimation(features, group='gender', vision_encoder_name='CLIP', onehot=False, loader=None):
-    path = '/n/holyscratch01/calmon_lab/Lab/datasets/mpr_stuffs/'
+def group_estimation(features, group='gender', vision_encoder_name='CLIP', onehot=False, loader=None, encoder=None, query=True):
+    path = '/n/holylabs/LABS/calmon_lab/Lab/datasets/mpr_stuffs/'
     if group in ['gender', 'age','race', 'race2']:
         with open(os.path.join(path,'clfs',f'fairface_{vision_encoder_name}_clf_{group}.pkl'), 'rb') as f:
             clf = pickle.load(f)
+            # clf.best_estimator_.coef_ = clf.best_estimator_.coef_.astype(np.float16)
+            # clf.best_estimator_.intercept_ = clf.best_estimator_.intercept_.astype(np.float16)
             estimated_group = clf.predict_proba(features)
             if onehot:
                 # if estimated_group.shape[-1] == 1:
@@ -173,6 +180,30 @@ def group_estimation(features, group='gender', vision_encoder_name='CLIP', oneho
         print(item_presence[:,0])
         estimated_group = item_presence
         print(f'wheelchair 1/0: {torch.sum(item_presence[:,1])}/{item_presence.shape[0]-torch.sum(item_presence[:,0])}')
+    
+    elif group == 'paths':
+        estimated_group = path_estimate(features, encoder)
+        if onehot:
+            one_hot_indices = np.argmax(estimated_group, axis=1)
+            estimated_group = np.eye(estimated_group.shape[1])[one_hot_indices]
+        print(estimated_group.shape)
+        print(estimated_group.sum(axis=0))
+
+    elif group == 'emotion':
+        estimated_group = emotion_estimate(features, encoder)
+        if onehot:
+            one_hot_indices = np.argmax(estimated_group, axis=1)
+            estimated_group = np.eye(estimated_group.shape[1])[one_hot_indices]
+        print(estimated_group.shape)
+        print(estimated_group.sum(axis=0))
+
+    elif group == 'eyeglasses':
+        estimated_group = eyeglasses_estimate(features, encoder, query)
+        if onehot:
+            one_hot_indices = np.argmax(estimated_group, axis=1)
+            estimated_group = np.eye(estimated_group.shape[1])[one_hot_indices]
+        print(estimated_group.shape)
+        print(estimated_group.sum(axis=0))
 
     # elif g == 'skintone':
     #     from skintone_esti import FanCrop
@@ -190,6 +221,127 @@ def group_estimation(features, group='gender', vision_encoder_name='CLIP', oneho
 
     return estimated_group
 
+
+def path_estimate(features, encoder):
+
+    genders = ['man', 'woman', 'non-binary']    
+    ethnicities = ['African-American', 'American Indian', 'Asian', 'Black', 'Caucasian', 'East Asian', 'First Nations', 'Hispanic', 'Indigenous','American', 'Latino','Latinx', 'Native American', 'Multiracial', 'Pacific Islander', 'South Asian', 'Southeast Asian', 'White']
+    adjectives = ['ambitious','assertive','confident','decisive','determined','intelligent','outspoken','self-confident','stubborn','unreasonable','committed','supportive','sensitive','emotional','gendtle','honest','modest','compassionate','considerate','pleasant']
+
+    total_embeddings = []
+    texts = []
+    for adjective in adjectives:
+        for gender in genders:
+            tmp = []
+            for ethnicity in ethnicities:
+                text = f'A photo of a {adjective} {gender} {ethnicity} person'
+                texts.append(text)
+                # print(text)
+                # tmp.append(text)
+                text_inputs = clip.tokenize(text).to('cuda')
+                with torch.no_grad():
+                    text_embedding = encoder.encode_text(text_inputs)
+                text_embedding = text_embedding / torch.norm(text_embedding, dim=-1, keepdim=True)
+                tmp.append(text_embedding)
+            text_embedding = torch.cat(tmp)
+
+
+            # Generate text embeddings
+            # with torch.no_grad():
+                # text_embedding = encoder.encode_text(text_inputs)
+            # print(text_embedding.shape)
+            n_iter = features.shape[0]//256  
+            n_iter = n_iter + 1 if features.shape[0]%256 != 0 else n_iter
+            tmp_probs = []
+            for i in range(n_iter):
+                if i == n_iter-1:
+                    image = features[i*256:]
+                else:
+                    image = features[i*256:(i+1)*256]
+                image = torch.tensor(image).to('cuda')
+                image = image / torch.norm(image, dim=-1, keepdim=True)
+                tmp_probs.append(image @ text_embedding.T)
+            tmp_probs = torch.cat(tmp_probs)
+            # print(tmp_probs.shape)
+            total_embeddings.append(tmp_probs)
+    total_embeddings = torch.cat(total_embeddings, dim=1)
+    idxs = total_embeddings.argmax(dim=1)
+    # if features.shape[0] > 5002:
+        # for idx in idxs:
+            # print(texts[idx])
+    # print(total_embeddings.shape)
+    return total_embeddings.cpu().numpy()
+
+def emotion_estimate(features, encoder):
+
+    adjectives = ['ambitious','assertive','confident','decisive','determined','intelligent','outspoken','self-confident','stubborn','unreasonable','committed','supportive','sensitive','emotional','gendtle','honest','modest','compassionate','considerate','pleasant']
+
+    tmp = []
+    texts = []
+    for adjective in adjectives:
+        text = f'A photo of a {adjective} person'
+        texts.append(text)
+        # print(text)
+        # tmp.append(text)
+        text_inputs = clip.tokenize(text).to('cuda')
+        with torch.no_grad():
+            text_embedding = encoder.encode_text(text_inputs)
+        text_embedding = text_embedding / torch.norm(text_embedding, dim=-1, keepdim=True)
+        tmp.append(text_embedding)
+    text_embedding = torch.cat(tmp)
+
+
+    n_iter = features.shape[0]//256  
+    n_iter = n_iter + 1 if features.shape[0]%256 != 0 else n_iter
+    tmp_probs = []
+    for i in range(n_iter):
+        if i == n_iter-1:
+            image = features[i*256:]
+        else:
+            image = features[i*256:(i+1)*256]
+        image = torch.tensor(image).to('cuda')
+        image = image / torch.norm(image, dim=-1, keepdim=True)
+        tmp_probs.append(image @ text_embedding.T)
+    tmp_probs = torch.cat(tmp_probs)
+    male_probs = tmp_probs[:,:11].mean(dim=1)
+    female_probs = tmp_probs[:,11:].mean(dim=1)
+    probs = torch.stack([male_probs, female_probs], dim=1)
+    probs = torch.softmax(probs, dim=1)
+    return probs.cpu().numpy()
+
+def eyeglasses_estimate(features, encoder, query=True):
+    tmp = []
+    prompts = ['A photo of a person wearing eye glasses', 'A photo of a person not wearing eye glasses']
+    if query:
+        for prompt in prompts:
+            text = prompt
+            text_inputs = clip.tokenize(text).to('cuda')
+            with torch.no_grad():
+                text_embedding = encoder.encode_text(text_inputs)
+            text_embedding = text_embedding / torch.norm(text_embedding, dim=-1, keepdim=True)
+            tmp.append(text_embedding)
+        text_embedding = torch.cat(tmp)
+
+        n_iter = features.shape[0]//256  
+        n_iter = n_iter + 1 if features.shape[0]%256 != 0 else n_iter
+        tmp_probs = []
+        for i in range(n_iter):
+            if i == n_iter-1:
+                image = features[i*256:]
+            else:
+                image = features[i*256:(i+1)*256]
+            image = torch.tensor(image).to('cuda')
+            image = image / torch.norm(image, dim=-1, keepdim=True)
+            tmp_probs.append(image @ text_embedding.T)
+        tmp_probs = torch.cat(tmp_probs)
+        probs = torch.softmax(tmp_probs, dim=1)
+    else:
+        n_samples = features.shape[0]
+        # give True with the probability of 0.5 for each sample
+        probs = torch.rand(n_samples, 1)
+        print(probs.mean())
+        probs = torch.cat([1-probs, probs], dim=1)
+    return probs.cpu().numpy()
 
 # old version
 def _blip_extraction(encoder, dataloader, args, query=True):

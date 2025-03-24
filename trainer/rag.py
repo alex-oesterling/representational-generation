@@ -148,10 +148,21 @@ class Trainer(GenericTrainer):
         max_length = prompt_embeds.shape[1]
 
         token_embedding_dim = prompt_embeds.shape[-1]
-        self.linear_projector = nn.Linear(512, token_embedding_dim).to(self.accelerator.device, dtype=self.weight_dtype_high_precision)
-
+        self.linear_projector = linear_projector = nn.Sequential(
+            nn.Linear(512, token_embedding_dim),
+            nn.ReLU()
+        ).to(self.accelerator.device, dtype=self.weight_dtype_high_precision)
+        def init_weights(m):
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+        self.linear_projector.apply(init_weights)
+        # nn.Linear(512, token_embedding_dim).to(self.accelerator.device, dtype=self.weight_dtype_high_precision)
+        # torch.nn.init.xavier_uniform_(self.linear_projector.weight)
+        self.linear_projector.requires_grad_(True)
         params_to_optimize = self.linear_projector.parameters()
-
+        print(params_to_optimize)
         optimizer = torch.optim.AdamW(
             params_to_optimize,
             lr=self.args.learning_rate,
@@ -173,9 +184,7 @@ class Trainer(GenericTrainer):
             power=self.args.lr_power,
         )
         
-        self.linear_projector, optimizer, lr_scheduler = self.accelerator.prepare(
-                self.linear_projector, optimizer, lr_scheduler
-            )
+        self.linear_projector, optimizer, lr_scheduler = self.accelerator.prepare(self.linear_projector, optimizer, lr_scheduler)
         
         # Train!
         logger.info("***** Running training *****")
@@ -185,11 +194,14 @@ class Trainer(GenericTrainer):
 
         # Only show the progress bar once on each machine.
         self.wandb_tracker = self.accelerator.get_tracker("wandb", unwrap=True)
-
         
-
-
         self.global_step = 0
+        for name, param in self.linear_projector.named_parameters():
+            print(name, param.requires_grad)
+        torch.autograd.set_detect_anomaly(True)
+        self.text_encoder.train()
+        self.unet.train()
+        self.vae.train()
         while self.global_step < self.args.iterations:
             # num_denoising_steps = random.choices(range(19,24), k=1)
             # torch.distributed.broadcast_object_list(num_denoising_steps, src=0)
@@ -210,7 +222,7 @@ class Trainer(GenericTrainer):
                 image1 = image1.to(self.accelerator.device)
                 latents = self.vae.encode(image2).latent_dist.sample()
                 latents = latents * self.vae.config.scaling_factor
-                latents = latents.to(self.weight_dtype)
+                # latents = latents.to(self.weight_dtype)
                 # Sample noise that we'll add to the latents   
                 
                 noise = torch.randn_like(latents)
@@ -236,13 +248,14 @@ class Trainer(GenericTrainer):
                 
                 text_image_embeds = torch.cat([_prompt_embeds, image_token_embeds], dim=1)
                 text_image_embeds = text_image_embeds.to(self.weight_dtype)
+
                 # repeat text_image as much as the number of batch size
-                
-                model_pred = self.unet(noisy_latents, timesteps, text_image_embeds, return_dict=False)[0]
+                model_pred = self.unet(noisy_latents, timesteps, text_image_embeds,  return_dict=False)[0]
 
                 target = noise
                 # loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
                 loss = F.mse_loss(model_pred, target, reduction="mean")
+                print(f"loss: {loss.item()}")
 
                 # Gather the losses across all processes for logging (if we use distributed training).
                 avg_loss = accelerator.gather(loss.repeat(self.args.train_GPU_batch_size)).mean()
@@ -251,31 +264,40 @@ class Trainer(GenericTrainer):
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(self.linear_projector.parameters(), self.args.max_grad_norm)
+                self.model_sanity_print(self.linear_projector, "check No.1, text_encoder: after self.accelerator.backward()")
+                #for p in self.linear_projector.parameters():
+                #    print(p.grad)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
 
-                if self.accelerator.is_main_process:
-                    if self.global_step % self.args.checkpointing_steps == 0:
-                        # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
-                        if self.args.checkpoints_total_limit is not None:
-                            name = "checkpoint_tmp"
-                            clean_checkpoint(self.args.ckpts_save_dir, name, self.args.checkpoints_total_limit)
+                # if self.accelerator.is_main_process:
+                    # if self.global_step % self.args.checkpointing_steps == 0:
+                    #     # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
+                    #     if self.args.checkpoints_total_limit is not None:
+                    #         name = "checkpoint_tmp"
+                    #         clean_checkpoint(self.args.ckpts_save_dir, name, self.args.checkpoints_total_limit)
 
-                        save_path = os.path.join(self.args.ckpts_save_dir, f"checkpoint_tmp-{self.global_step}")
-                        self.accelerator.save_state(save_path)
-                        torch.save(self.linear_projector.state_dict(), save_path)
+                    #     save_path = os.path.join(self.args.ckpts_save_dir, f"checkpoint_tmp-{self.global_step}")
+                    #     self.accelerator.save_state(save_path)
+                    #     torch.save(self.linear_projector.state_dict(), save_path)
                     
-                        logger.info(f"Accelerator checkpoint saved to {save_path}")
-                    
-                    if self.global_step % self.args.checkpointing_steps_long == 0:
-                        # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
+                    #     logger.info(f"Accelerator checkpoint saved to {save_path}")
+            print(f"train_loss: {train_loss/len(loader)}")
+            if self.accelerator.is_main_process:
+                #if self.global_step % self.args.checkpointing_steps_long == 0:
+                    # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
 
-                        save_path = os.path.join(self.args.ckpts_save_dir, f"checkpoint-{self.global_step}")
-                        self.accelerator.save_state(save_path)
-                        torch.save(self.linear_projector.state_dict(), save_path)
+                save_path = os.path.join(self.args.ckpts_save_dir, f"checkpoint-{self.global_step}")
+                self.accelerator.save_state(save_path)
+                # save linear projector parameter
+                torch.save(self.linear_projector.state_dict(), save_path+'.pt')
 
-                        logger.info(f"Accelerator checkpoint saved to {save_path}")
+                logger.info(f"Accelerator checkpoint saved to {save_path}")
+
+    def model_sanity_print(self, model, state):
+        params = [p for p in model.parameters()]
+        print(f"\t{self.accelerator.device}; {state};\n\t\tparam[0]: {params[0].flatten()[0].item():.8f};\tparam[0].grad: {params[0].grad.flatten()[0].item():.8f}")
 
 
 def clean_checkpoint(ckpts_save_dir, name, checkpoints_total_limit):
@@ -296,3 +318,4 @@ def clean_checkpoint(ckpts_save_dir, name, checkpoints_total_limit):
         for removing_checkpoint in removing_checkpoints:
             removing_checkpoint = os.path.join(ckpts_save_dir, removing_checkpoint)
             shutil.rmtree(removing_checkpoint)
+

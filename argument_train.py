@@ -19,13 +19,16 @@ def get_args():
     parser.add_argument('--n-iters', default=50, type=int, help='total iterations')
     parser.add_argument('--trainer-group', type=str, nargs='+', default=['gender','age','race'])    
     parser.add_argument('--training-dataset', type=str, default=None)    
+    parser.add_argument('--race-reduce', default=False, action='store_true', help='reduce race')
     parser.add_argument('--bal-sampling', default=False, action='store_true')
+    parser.add_argument('--eniac', default=False, action='store_true')
 
     parser.add_argument('--iterations', type=int, default=10000, help='number of epochs')
     parser.add_argument('--batch-size', type=int, default=256)
     parser.add_argument('--method', type=str, default=None, help='method to mitigate unfairness')
     parser.add_argument('--optimizer', type=str, default='adamw', help='optimizer')
     parser.add_argument('--lr-scheduler', type=str, default='cosine', help='scheduler')
+    parser.add_argument('--temp', type=float, default=1, help='learning rate')
 
     # hyperparameters for each method
     parser.add_argument('--lamb', type=float, default=0.5, help='regularization strength')
@@ -35,10 +38,11 @@ def get_args():
     parser.add_argument('--save-dir', type=str, default='results/', help='directory to save the results')
 
     # for finetuning
-    parser.add_argument('--finetuning-ver', type=str, default='ver1',choices = ['ver1','ver2'])
+    parser.add_argument('--finetuning-ver', type=str, default='ver1',choices = ['ver1','ver2','ver3'])
     parser.add_argument('--normalize', default=False, action='store_true', help='normalization for x')
     
     parser.add_argument('--mpr_num_batches', type=int, default=4, help='the number of batches for computing MPRs')
+    parser.add_argument('--n-cs', type=int, default=32, help='the number of constraints')
     parser.add_argument('--vision-encoder', type=str, default='CLIP',choices = ['BLIP', 'CLIP', 'PATHS'])
     parser.add_argument(
         "--max_train_steps",

@@ -12,6 +12,7 @@ dataset_dict = {'stable_bias_i' : ['data_handler.stable_bias','StableBiasIdentit
                 'openface': ['data_handler.openface','OpenFace'],
                 'custom': ['data_handler.custom_dataset','CustomDataset'],
                 'mscoco': ['data_handler.mscoco','MSCoco'],
+                'mscoco_val': ['data_handler.mscoco_val','MSCoco'],
                 # 'fairdiffusion' : ['data_handler.general','General'],
                 # 'fairdiffusion_gender' : ['data_handler.general','General']
                }

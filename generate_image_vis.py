@@ -26,28 +26,31 @@ group_dic = {
     'race2' : ['East Asian', 'Indian', 'Black', 'White', 'Middle Eastern', 'Latino_Hispanic', 'Southeast Asian'],
 }
 
-traits = ["attractive", "emotional", "exotic", "poor", "terrorist", "thug", "happy", "sad", "angry", "fearful", "calm", "wealthy", "poor", "educated", "unemployed", "urban"]
-professions = ["chef", "therapist", "housekeeper", "pilot", "flight attendant", "taxi driver", "nurse", "firefighter", "CEO", "computer programmer", "computer programmer for the ENIAC", "pope", "world cup competitor"]#"cook", 
+traits = ["attractive", "emotional", "exotic", "poor", "terrorist", "thug"]
+professions = ["driver","chef", "therapist", "housekeeper", "pilot", "flight attendant", "taxi driver", "nurse", "firefighter", "CEO", "computer programmer", "computer programmer for the ENIAC", "pope", "world cup competitor"]#"cook", 
 disabilities = ["bipolar disorder", "disability"]
 
 tokenizer = CLIPTokenizer.from_pretrained(
         "CompVis/stable-diffusion-v1-4",
         subfolder="tokenizer",
-        cache_dir='/n/holylabs/LABS/calmon_lab/Lab/diffusion_models'
+        cache_dir = '/n/holylabs/LABS/calmon_lab/Lab/diffusion_models'
         )
 
 token_path_template = "trained_models_old/itigen/ckpts/a_portrait_photo_of_a_person_{}/prepend_prompt_embedding_A_portrait_photo_of_a_{}/basis_final_embed_19.pt"
 
-def generation_for_finetuning(model, prompts, n_generation, cnt=0, num_denoising_steps = 25):
+def generation_for_finetuning(model, prompts, n_generation, cnt=0, num_denoising_steps = 25, latents=None):
     weight_dtype_high_precision = torch.float32
     weight_dtype = torch.float16
     device = model.device
     guidance_scale = 7.5
 
-    noises = torch.randn(
-        [n_generation,4,64,64],
-        dtype=weight_dtype_high_precision
-    ).to(device)
+    if latents == None:
+        noises = torch.randn(
+            [n_generation,4,64,64],
+            dtype=weight_dtype_high_precision
+        ).to(device)
+    else:
+        noises = latents.to(device, dtype=weight_dtype_high_precision)
     
     # with open('tmp/noise_tmp.pkl', 'rb') as f:
         # noises = pickle.load(f)
@@ -156,7 +159,6 @@ def main():
     parser.add_argument('--use-adjective', default=False, action='store_true')
     parser.add_argument('--group', type=str, nargs='+', default=['gender','age','race'])    
     parser.add_argument('--prompt-path', type=str, default='prompt path')
-    parser.add_argument('--lamb', type=float, default=0)
 
     args = parser.parse_args()
 
@@ -179,7 +181,6 @@ def main():
         elif args.model == 'SD_2':
             name = "CompVis/stable-diffusion-v2-1"
         model = SemanticEditPipeline.from_pretrained(
-        # "runwayml/stable-diffusion-v1-5",
         name,
         # torch_dtype=torch.float16,
         cache_dir=cache_dir
@@ -227,10 +228,7 @@ def main():
         file.close()
 
     # only for entigen
-    base_path = f'datasets/{args.trainer}'
-    if 'finetuning' in args.trainer and args.lamb != 0:
-        base_path = f'datasets/{args.trainer}_lamb{args.lamb}'
-
+    base_path = f'datasets/{args.trainer}_vis'
     if 'scratch' not in args.trainer:
         group_name = "".join([g[0].upper() for g in args.group])
         # group_name = args.group[0]
@@ -260,6 +258,8 @@ def main():
     # sampled_occupations = occupation_column.sample(n=1000, replace=True, random_state=42)
     # sampled_occupations = list(sampled_occupations)
     # print(sampled_occupations)
+    with open('noise_vis.pkl', 'rb') as f:
+        latents = pickle.load(f)
     for concept in concepts:
         if args.conceptfile_path is not None:
             template = prompt_dic['profession']
@@ -291,8 +291,7 @@ def main():
         # make prompts
         prefix = 'an' if concept[0].lower() in ['a','e','i','o','u'] else 'a'
         prompt = template + f"{prefix} {concept}"
-        #if concept in traits[:4]:
-        if concept in traits:
+        if concept in traits[:4]:
             prompt += " person"
 
         if args.trainer == 'entigen':
@@ -352,7 +351,8 @@ def main():
         num_for_print = 100
         bbox_dic = {}
         n_iter = 0
-        while img_num < args.n_generations:
+        for step in range(10):
+            latent = latents[step*10:(step+1)*10]
             
             if img_num > num_for_print:
                 num_for_print += 100
@@ -377,14 +377,15 @@ def main():
 
             with torch.no_grad():
                 if 'finetuning' in args.trainer:
-                    images = generation_for_finetuning(model, prompt, args.n_gen_per_iter)#, cnt=cnt)
+                    images = generation_for_finetuning(model, prompt, args.n_gen_per_iter, latents=latent)
                     # images = model(prompt=prompt, num_inference_steps=25, num_images_per_prompt=args.n_gen_per_iter, generator=gen).images
                 elif args.trainer == 'itigen':
                     flat_index = np.random.choice(a=group_prob.size, p=group_prob.flatten())
                     # idxs = np.unravel_index(flat_index, group_prob.shape)
                     text_embed = text_embeds[flat_index]
                     text_embed = text_embed.unsqueeze(0)
-                    images = model(prompt_embeds=text_embed, num_inference_steps=25, num_images_per_prompt=args.n_gen_per_iter, generator=gen).images
+                    latent = latent.to(torch.float16)
+                    images = model(prompt_embeds=text_embed, num_inference_steps=25, num_images_per_prompt=args.n_gen_per_iter, latents=latent).images
                 elif args.trainer == 'fairdiffusion':
                     #make reverse_editing_direction
                     # choose group
@@ -398,7 +399,7 @@ def main():
                         pos += len(group_dic[group])
 
                     images = model(prompt=prompt, 
-                                num_images_per_prompt=args.n_gen_per_iter, guidance_scale=7.5,generator=gen,
+                                num_images_per_prompt=10, guidance_scale=7.5,generator=gen,
                                 num_inference_steps=25,
                                 editing_prompt=group_prompt_list, 
                                 reverse_editing_direction=_reverse_editing_direction, # Direction of guidance i.e. decrease the first and increase the second concept
@@ -408,7 +409,8 @@ def main():
                                 edit_momentum_scale=0.3, # Momentum scale that will be added to the latent guidance
                                 edit_mom_beta=0.6, # Momentum beta
                                 # edit_weights=edit_weights # Weights of the individual concepts against each other
-                                edit_weights=[1]*len(group_prompt_list)
+                                edit_weights=[1]*len(group_prompt_list),
+                                latents=latent
                             ).images
                 else: #args.trainer != 'fairdiffusion' and 'finetuning' not in args.trainer: 
                     if model_name == 'LCM':
@@ -447,36 +449,30 @@ def main():
                             num_inference_steps=10
                         ).images
                         # decoder_output.save("cascade.png")            
+
                     elif model_name == 'pixelart':
                         images = model(prompt=prompt, guidance_scale=4.5, num_inference_steps=25, num_images_per_prompt=args.n_gen_per_iter, generator=gen).images
                     elif model_name == 'playground':
                         images = model(prompt=prompt, num_inference_steps=25, guidance_scale=3).images
                     else:
-                        images = model(prompt=prompt, num_inference_steps=25, num_images_per_prompt=args.n_gen_per_iter, generator=gen).images
+                        latent = latent.to(torch.float16)
+                        images = model(prompt=prompt, num_inference_steps=25, num_images_per_prompt=args.n_gen_per_iter, latents=latent).images
 
             image_tensors = torch.stack([transform(image) for image in images])
 
             flags, bboxs = face_detector.process_tensor_image(image_tensors)
 
             total_generations += len(images)
-        # if sum(flags) > 0:
             filtered_images += sum(~flags)
             bbox_idx = 0
             for j, flag in enumerate(flags):
                 image = images[j]
-                if flag:
-                    image.save(f"{path}/{img_num}.png")
-                    # image.save(f"{path}/{filtered_ids[img_num]}.png")
-                    bbox_dic[img_num] = face_detector.extract_position(bbox=bboxs[bbox_idx], image_size=512)
-                    img_num += 1
-                    bbox_idx += 1
-                else:
-                    image.save(f"{path_filtered}/{img_num_filtered}.png")
-                    img_num_filtered += 1
-
-                if img_num == args.n_generations:
-                        break
+                image.save(f"{path}/{img_num}.png")
+                # bbox_dic[img_num] = face_detector.extract_position(bbox=bboxs[bbox_idx], image_size=512)
+                img_num += 1
+                bbox_idx += 1
                 n_iter += 1
+            print(step)
             
         if total_generations > 0:
             print(f"Percentage of filtered images: {filtered_images/total_generations}")

@@ -53,11 +53,23 @@ class FaceDetector:
         bbox_new[3] = int(round(bbox[3] + more_height*0.5))
         return bbox_new        
 
-    def _get_largest_face_app(self, faces, image):
+    # def _get_largest_face_app(self, faces, image):
+    #     area_max = 0
+    #     idx_max = 0
+    #     for idx in range(len(faces)):
+    #         left, bottom, right, top = faces[idx]
+    #         area = (right - left) * (bottom - top)
+    #         if area > area_max:
+    #             area_max = area
+    #             idx_max = idx
+    #     return faces[idx_max]
+
+    def __get_largest_face_app(self, faces, image):
         area_max = 0
         idx_max = 0
         for idx in range(len(faces)):
-            left, bottom, right, top = faces[idx]
+            left, top, right, bottom = self.extract_position(image, faces[idx])
+            bbox = faces[idx]
             area = (right - left) * (bottom - top)
             if area > area_max:
                 area_max = area
@@ -73,7 +85,7 @@ class FaceDetector:
             images = (images*255).cpu().detach().permute(0,2,3,1).numpy().astype(np.uint8)
         
         # images_np = images.permute(0,2,3,1).float().numpy().astype(np.uint8)
-
+        print(images.shape)
         num_faces_list = []
         for idx, image in enumerate(images):
             # faces_from_app = self.app.get(image_np[:,:,[2,1,0]])
@@ -81,28 +93,67 @@ class FaceDetector:
             # gray_image = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
             # faces_from_app = self.app(gray_image)
 
-            # faces_from_app = self.app(image, 1)
-            faces_from_app = face_recognition.face_locations(image, model="cnn", number_of_times_to_upsample=0)
+            faces_from_app = self.app(image, 1)
+            # faces_from_app = face_recognition.face_locations(image, model="cnn", number_of_times_to_upsample=0)
             # print(faces_from_app)
             num_faces = len(faces_from_app)
             num_faces_list.append(num_faces)
             if num_faces >= 1:
                 if num_faces > 1:
-                    faces_from_app = self._get_largest_face_app(faces_from_app, image)
-                else:
-                    faces_from_app = faces_from_app[0]
-                faces_from_app = np.array((faces_from_app[-1],) + faces_from_app[:-1])                    
-                faces_from_app = self._expand_bbox(faces_from_app, expand_coef=1.1, target_ratio=1)
-                faces_from_app = [faces_from_app]
+                    faces_from_app = self.__get_largest_face_app(faces_from_app, image)
+                    faces_from_app = [faces_from_app]
+                # faces = self._crop_face(images[idx], bbox, target_size=[224,224], fill_value=fill_value)
+                
+                # face_landmarks = np.array(face_from_app["kps"])
+                # aligned_faces = image_pipeline(images[idx], face_landmarks)
+
                 face_indicators.append(True)
                 face_bboxs.extend(faces_from_app)
-
             else:
                 face_indicators.append(False)
         print(f"The number of images filtered : {len(images)-sum(face_indicators)}")
         
         face_indicators = torch.tensor(face_indicators)
         return face_indicators, face_bboxs
+    
+    # def process_tensor_image(self, images, fill_value=-1, torch_tensor=True):
+    #     faces = []
+    #     face_indicators = []
+    #     face_bboxs = []
+    #     images_ori = images
+    #     if torch_tensor:
+    #         images = (images*255).cpu().detach().permute(0,2,3,1).numpy().astype(np.uint8)
+        
+    #     # images_np = images.permute(0,2,3,1).float().numpy().astype(np.uint8)
+
+    #     num_faces_list = []
+    #     for idx, image in enumerate(images):
+    #         # faces_from_app = self.app.get(image_np[:,:,[2,1,0]])
+    #         # faces_from_app = self.app.get(image_np[:,:,[2,1,0]])
+    #         # gray_image = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+    #         # faces_from_app = self.app(gray_image)
+
+    #         faces_from_app = self.app(image, 1)
+    #         # faces_from_app = face_recognition.face_locations(image, model="cnn", number_of_times_to_upsample=0)
+    #         # print(faces_from_app)
+    #         num_faces = len(faces_from_app)
+    #         num_faces_list.append(num_faces)
+    #         if num_faces >= 1:
+    #             if num_faces > 1:
+    #                 faces_from_app = self._get_largest_face_app(faces_from_app, image)
+    #             else:
+    #                 faces_from_app = faces_from_app[0]
+    #             faces_from_app = np.array((faces_from_app[-1],) + faces_from_app[:-1])                    
+    #             faces_from_app = self._expand_bbox(faces_from_app, expand_coef=1.1, target_ratio=1)
+    #             faces_from_app = [faces_from_app]
+    #             face_indicators.append(True)
+    #             face_bboxs.extend(faces_from_app)
+    #         else:
+    #             face_indicators.append(False)
+    #     print(f"The number of images filtered : {len(images)-sum(face_indicators)}")
+        
+    #     face_indicators = torch.tensor(face_indicators)
+    #     return face_indicators, face_bboxs
 
     def process_tensor_image_for_mscoco(self, images, fill_value=-1, torch_tensor=True):
         faces = []
@@ -113,6 +164,7 @@ class FaceDetector:
         
         # images_np = images.permute(0,2,3,1).float().numpy().astype(np.uint8)
         num_faces_list = []
+
         for idx, image in enumerate(images):
             # faces_from_app = self.app.get(image_np[:,:,[2,1,0]])
             # faces_from_app = self.app.get(image_np[:,:,[2,1,0]])
@@ -194,34 +246,52 @@ class FaceDetector:
         num_faces = len(faces_from_app)
         return num_faces >= 1
     
-    def extract_position(self, image=None, bbox=None, image_size=None):
-        # bbox = bbox.rect
-        max_height = image_size if image is None else image.shape[-2]
-        max_width = image_size if image is None else image.shape[-1]
-        # left, top, right, bottom = bbox.left(), bbox.top(), bbox.right(), bbox.bottom()
-        left, top, right, bottom = bbox[0], bbox[1], bbox[2], bbox[3]
-        pad_left = max(0, -left)
-        pad_top = max(0, -top)
-        pad_right = max(0, right - max_width)
-        pad_bottom = max(0, bottom - max_height)
-        # if pad_left>0 or pad_top>0 or pad_right>0 or pad_bottom>0:
-            # print(f"padding: {pad_left}, {pad_top}, {pad_right}, {pad_bottom}")
-
-        left, top, right, bottom = bbox[0], bbox[1], bbox[2], bbox[3]
-
+    def extract_position(self, image, bbox):
+        bbox = bbox.rect
+        # left, top, width, height = bbox.left(), bbox.top(), bbox.width(), bbox.height()
+        left, top, right, bottom = bbox.left(), bbox.top(), bbox.right(), bbox.bottom()
         if right < left:
             print(left, top, right, bottom)
         left = max(left, 0)
         top = max(top, 0)
         if type(image) == torch.Tensor or type(image) == np.ndarray:
-            right = min(right, max_width)
-            bottom = min(bottom, max_height)
+            right = min(right, image.shape[-1])
+            bottom = min(bottom, image.shape[-2])
         # if image is PIL Image
         else:
-            right = min(right, max_height)
-            bottom = min(bottom, max_width)
+            right = min(right, image.size[-2])
+            bottom = min(bottom, image.size[-1])
 
-        return [left, top, right, bottom, pad_left, pad_top, pad_right, pad_bottom]
+        return [left, top, right, bottom]    
+    
+    # def extract_position(self, image=None, bbox=None, image_size=None):
+    #     # bbox = bbox.rect
+    #     max_height = image_size if image is None else image.shape[-2]
+    #     max_width = image_size if image is None else image.shape[-1]
+    #     # left, top, right, bottom = bbox.left(), bbox.top(), bbox.right(), bbox.bottom()
+    #     left, top, right, bottom = bbox[0], bbox[1], bbox[2], bbox[3]
+    #     pad_left = max(0, -left)
+    #     pad_top = max(0, -top)
+    #     pad_right = max(0, right - max_width)
+    #     pad_bottom = max(0, bottom - max_height)
+    #     # if pad_left>0 or pad_top>0 or pad_right>0 or pad_bottom>0:
+    #         # print(f"padding: {pad_left}, {pad_top}, {pad_right}, {pad_bottom}")
+
+    #     left, top, right, bottom = bbox[0], bbox[1], bbox[2], bbox[3]
+
+    #     if right < left:
+    #         print(left, top, right, bottom)
+    #     left = max(left, 0)
+    #     top = max(top, 0)
+    #     if type(image) == torch.Tensor or type(image) == np.ndarray:
+    #         right = min(right, max_width)
+    #         bottom = min(bottom, max_height)
+    #     # if image is PIL Image
+    #     else:
+    #         right = min(right, max_height)
+    #         bottom = min(bottom, max_width)
+
+    #     return [left, top, right, bottom, pad_left, pad_top, pad_right, pad_bottom]
 
 if __name__ == "__main__":
 
@@ -249,17 +319,19 @@ if __name__ == "__main__":
                 transforms.ToTensor()]
         )
     else:
-        print('here')
         transform = transforms.Compose(
             [transforms.ToTensor()]
         )
         
     loader.dataset.processor = None
     loader.dataset.transform = transform
-
+        
     filtered_ids = []
     unfiltered_ids = []
     bbox_dic = {}
+
+    if 'original' in args.dataset_path:
+        args.new_dataset_path = args.dataset_path.replace('_original', '')
 
     if not os.path.exists(args.dataset_path+'/new'):
         os.makedirs(args.dataset_path+'/new')
@@ -281,6 +353,7 @@ if __name__ == "__main__":
                 img_pil.save(f"{args.dataset_path}/new/{n_imgs}.png")
                 n_imag_per_iter += 1
                 n_imgs += 1
+            
 
     # Save the filtered and unfiltered IDs to files
     with open(os.path.join(args.dataset_path,'filtered_ids.txt'), 'w') as f:

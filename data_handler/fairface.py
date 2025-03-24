@@ -31,11 +31,14 @@ class FairFace(GenericDataset):
             df = pd.read_csv(self.dataset_path + "/fairface_label_val.csv")
 
         self.race_to_idx = {}
-        race = ['East Asian', 'Indian', 'Black', 'White', 'Middle Eastern', 'Latino_Hispanic', 'Southeast Asian'],
-        race2 = ['White', 'Black', 'Latino_Hispanic', 'Asian'],
-        for i, race in enumerate(df.race.unique()):
+        races = ['East Asian', 'Indian', 'Black', 'White', 'Middle Eastern', 'Latino_Hispanic', 'Southeast Asian']
+        # races = ['White', 'Black', 'Latino_Hispanic', 'Asian']
+                        
+        # for i, race in enumerate(df.race.unique()):
+        for i, race in enumerate(races):
             self.labeltags.append(race)
             self.race_to_idx[race] = i
+
         self.gender_to_idx = {
             'Male': 0,
             'Female': 1
@@ -54,6 +57,10 @@ class FairFace(GenericDataset):
         }
 
         one_hot = torch.nn.functional.one_hot(torch.tensor([self.race_to_idx[race] for race in df.race])).numpy()
+        if self.args.race_reduce:
+            one_hot[:,0] = one_hot[:,0] + one_hot[:,6] 
+            one_hot[:,3] = one_hot[:,3] + one_hot[:,4] + one_hot[:,5] 
+            one_hot = one_hot[:,[0,1,2,3]]
         gender_idx = [self.gender_to_idx[gen] for gen in df.gender]
         age_idx = [self.age_to_idx[age] for age in df.age]
 
